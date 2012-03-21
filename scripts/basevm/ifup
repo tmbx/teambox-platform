@@ -1,0 +1,16 @@
+#!/bin/sh
+
+# Set the host name and configure the machine for DHCP.
+
+set -e
+
+if [ -z "$1" ]; then
+    echo "Usage: $0 <hostname>"
+    exit 1
+fi
+
+echo $1 > /etc/hostname
+hostname $1
+cp -f /update/cfg/interfaces /etc/network/
+/etc/init.d/networking restart
+

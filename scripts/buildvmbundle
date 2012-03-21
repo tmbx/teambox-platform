@@ -1,0 +1,46 @@
+#!/usr/bin/python
+
+# This script creates the file bundle used to install or update the Teambox
+# build machine.
+
+import shutil
+from kfile import *
+from krun import *
+
+# Perform a recursive copy of 'src' to 'dst'. 'src' is assumed to be a shell
+# pattern.
+def rec_copy(src, dst):
+    show_cmd_output("cp -r %s %s" % (src, dst), shell_flag=1)
+
+def main():
+    
+    # Make sure our paths are setup correctly.
+    base_dir = append_trailing_slash(os.path.normpath(os.path.abspath("../..")))
+    kpython_dir = base_dir + "kpython/"
+    platform_dir = base_dir + "teambox-platform/"
+    platform_script_dir = platform_dir + "scripts/"
+    console_dir = base_dir + "teambox-console-setup/"
+    assert_dir_exist(kpython_dir)
+    assert_dir_exist(platform_dir)
+    assert_dir_exist(console_dir)
+    
+    # Create the bundle.
+    bundle_dir = "bundle/"
+    flash_dir = bundle_dir + "flash/"
+    deploy_dir = bundle_dir + "deploy/"
+    if os.path.exists(bundle_dir): shutil.rmtree(bundle_dir)
+    for dest in [ bundle_dir, flash_dir, deploy_dir ]:
+        os.mkdir(dest)
+        rec_copy(kpython_dir + "*.py", dest)
+        rec_copy(kpython_dir + "perl", dest)
+    for name in [ "buildvm/*", "basevm", "hk", "krelease", "vmm" ]:
+        rec_copy(platform_script_dir + name, bundle_dir)
+    rec_copy(platform_script_dir + "deploy/*", deploy_dir)
+    for name in [ "kasmodel.py", "kasmodeltool.py" ]:
+        rec_copy(console_dir + "cfg/python/" + name, bundle_dir)
+        rec_copy(console_dir + "cfg/python/" + name, deploy_dir)
+    for name in [ "bootstrap.sh", "activate.sh" ]:
+        rec_copy(console_dir + "new/" + name, deploy_dir)
+
+main()
+

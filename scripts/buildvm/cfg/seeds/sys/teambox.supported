@@ -1,0 +1,89 @@
+This file contains the packages that are nice to have around or that are
+required to build the software.
+
+== Kernel ==
+ 
+ * linux-headers-2.6.31-19-generic
+ * open-vm-source
+ * module-assistant
+
+
+== Development ==
+ 
+ * cowdancer
+ * debhelper
+ * germinate
+ * fakeroot
+ * quilt
+ * mercurial
+ * scons
+ * autoconf
+ * automake
+ * gcc
+ * gdb
+ * valgrind
+ * ipython
+ 
+
+== Libraries ==
+
+ * postgresql-server-dev-8.4
+ * libgnutls-dev
+ * libgcrypt11-dev
+ * libmhash-dev
+ * libsqlite3-dev
+ * libadns1-dev
+ * libapr1-dev
+ * libsasl2-dev
+ * libjpeg62-dev
+ 
+ 
+== postgresql-8.4 build dependencies ==
+
+ * cdbs
+ * libperl-dev
+ * tcl8.5-dev
+ * libreadline5-dev
+ * zlib1g-dev 
+ * libz-dev
+ * libpam0g-dev 
+ * libpam-dev
+ * libxml2-dev
+ * libkrb5-dev
+ * libldap2-dev
+ * libxslt1-dev
+ * libossp-uuid-dev
+ * python-dev 
+ * python-central 
+ * gettext
+ * hardening-wrapper
+ * bison
+ * flex
+ * docbook-utils
+ * openjade
+ * docbook
+#* bzip2
+#* libssl-dev
+#* perl
+#* debhelper
+
+
+== util-linux build dependencies ==
+
+ * pkg-config
+ * libncurses5-dev
+ * libslang2-dev 
+ * libselinux1-dev
+#* zlib1g-dev
+#* dpkg-dev
+#* debhelper
+#* lsb-release
+#* gettext
+  
+  
+== ssmtp build dependencies ==
+
+ * po-debconf
+#* libgnutls-dev
+#* quilt
+

@@ -1,0 +1,40 @@
+#!/usr/bin/python
+
+# This script creates the files k1.tmp_dist, k1.perm_dist and k1.updates.
+
+from kfile import *
+
+def get_dist(i, tmp_flag):
+    s = ""
+    s += "Codename: kas1.%i\n" % (i)
+    s += "Components: main\n"
+    s += "Architectures: i386 source\n"
+    if tmp_flag: s += "Update: kas1.%i\n" % (i)
+    s += "\n"
+    return s
+
+def main():
+    s = ""
+    s += "Name: k1-update\n"
+    s += "Method: http://ketchup.teambox.co/debian\n"
+    s += "Architectures: i386 source\n"
+    s += "Components: main\n"
+    s += "VerifyRelease: blindtrust\n\n"
+    updates = s
+    tmp_dist = ""
+    perm_dist = ""
+    
+    for i in range(2, 11):
+        tmp_dist += get_dist(i, 1)
+        perm_dist += get_dist(i, 0)
+        s = ""
+        s += "Name: kas1.%i\n" % (i)
+        s += "From: k1-update\n"
+        s += "Suite: kas1.%i\n" % (i)
+        updates += s + "\n"
+    write_file("k1.tmp_dist", tmp_dist)
+    write_file("k1.perm_dist", perm_dist)
+    write_file("k1.updates", updates)
+
+main()
+

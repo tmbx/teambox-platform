@@ -1,0 +1,1 @@
+/usr/bin/germinate -d karmic,karmic-updates,karmic-security -c main,universe,multiverse -m http://debian.yorku.ca/ubuntu/ --no-rdepends -a i386 -v

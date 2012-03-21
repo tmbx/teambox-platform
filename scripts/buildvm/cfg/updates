@@ -1,0 +1,16 @@
+Name: k2-update1
+Method: http://debian.yorku.ca/ubuntu/
+Architectures: i386 source
+Suite: karmic
+Components: main universe>main multiverse>main
+VerifyRelease: blindtrust
+FilterList: purge ../sys_pkg_list
+
+Name: k2-update2
+From: k2-update1
+Suite: karmic-updates
+
+Name: k2-update3
+From: k2-update1
+Suite: karmic-security
+

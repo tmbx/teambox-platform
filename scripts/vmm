@@ -1,0 +1,120 @@
+#!/bin/sh
+
+# This script is used to manage VMs on a ESXi host. Install it as /kstore/vmm
+# and make a symlink to it in /bin.
+
+# Print the usage and exit.
+print_usage()
+{
+     echo "Usage: $0 start|stop|register|unregister <vmx_file_name>"
+     exit 1
+}
+
+# Check if the number of arguments is within the bounds specified (nb, low,
+# high). Print usage if not.
+check_nb_arg()
+{
+    if [ $1 -lt $2 -o $1 -gt $3 ]; then
+        print_usage
+    fi
+}
+
+# Takes exit_code param that would be used if machine not found.
+get_VMID()
+{
+    VMID=`vim-cmd /vmsvc/getallvms | grep -v "^Vmid" | grep "$VMXFILENAME/$VMXFILENAME.vmx" | awk '{ print $1 }'`
+    if [ -z "$VMID" ]; then
+        echo "Nothing to be done, no registered VM with that name was found."
+        exit $1
+    fi
+}
+
+# Takes operation_to_be_done and exit_code param.
+get_VMSTAT()
+{
+    VMSTAT=`vim-cmd /vmsvc/power.getstate $VMID | grep Powered | awk '{ print $2 }'`
+    if [ "$VMSTAT" == $1 ]; then
+        echo "Nothing to be done, machine was already $1."
+        exit $2
+    fi
+}
+
+# Takes operation_to_be_done as a param.
+do_vm_operation()
+{
+
+    echo "Starting operation $1 on VM $VMID..."
+    vim-cmd vmsvc/$1 $VMID
+    if [ $? -eq 0 ]; then
+        echo "Done."
+    else
+        echo "Failed."
+        exit 1
+    fi
+}
+
+start_vm()
+{
+    # Get vmid, exit with failure if not found.
+    get_VMID 1
+
+    # Get machine state, exit with success if powered on.
+    get_VMSTAT "on" 0
+
+    do_vm_operation "power.on"
+}
+
+stop_vm()
+{
+    # Get vmid, exit with success if not found.
+    get_VMID 0
+
+    # Get machine state, exit with success if powered off.
+    get_VMSTAT "off" 0
+
+    do_vm_operation "power.off"
+}
+
+register_vm()
+{
+    echo "Registering machine /kstore/$VMXFILENAME/$VMXFILENAME.vmx"
+    vim-cmd solo/registervm /kstore/$VMXFILENAME/$VMXFILENAME.vmx
+    if [ $? -eq 0 ]; then
+        echo "Done."
+    else
+        echo "Failed."
+        exit 1
+    fi
+}
+
+unregister_vm()
+{
+    # Get vmid, exit with success if not found.
+    get_VMID 0
+
+    do_vm_operation "unregister"
+}
+
+deploy_vm()
+{
+    echo "foo"
+}
+
+# Verify number of params.
+check_nb_arg $# 1 10
+
+# Global variables.
+VMXFILENAME=$2
+VMID=""
+VMSTAT=""
+
+# Dispatch.
+case $1 in
+    start) check_nb_arg $# 2 2; start_vm;;
+    stop) check_nb_arg $# 2 2; stop_vm;;
+    unregister) check_nb_arg $# 2 2; unregister_vm;;
+    register) check_nb_arg $# 2 2; register_vm;;
+    *) print_usage
+    exit 1;;
+esac
+

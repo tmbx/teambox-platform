@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# This script flashes the base system image on the base VM and prepares it to be
+# bootstrapped on the next boot.
+
+set -e
+
+if [ -z "$1" ]; then
+    echo "Usage: $0 <ip>"
+    exit 1
+fi
+
+BASE_VM_IP=$1
+
+cd /teambox/basevm/
+cp -rf cfg kflashsys nextboot.py ifup /teambox/flash
+ssh root@$BASE_VM_IP rm -rf /update \
+                            /etc/udev/rules.d/70-persistent-net.rules \
+                            /lib/udev/rules.d/75-persistent-net-generator.rules
+scp -r /teambox/flash root@$BASE_VM_IP:/update
+cd /var/www/debian/extra/kas2.0/
+scp kswapsys k2_sys.tar.gz root@$BASE_VM_IP:/update
+scp /teambox/basevm/nextboot.sh root@$BASE_VM_IP:/etc/rc2.d/S99nextboot
+scp /teambox/k2_base_sources.list root@$BASE_VM_IP:/etc/apt/sources.list
+ssh root@$BASE_VM_IP "cd / && tar -zxvpf /update/k2_sys.tar.gz && /update/kflashsys /update && "\
+                     "echo -e '\nDone!\nPress any key to shutdown, CTRL-C to abort...' && " \
+                     "read JUNK && init 0"
+

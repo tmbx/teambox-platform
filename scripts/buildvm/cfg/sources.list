@@ -1,0 +1,7 @@
+deb http://debian.yorku.ca/ubuntu/ karmic main universe multiverse
+deb-src http://debian.yorku.ca/ubuntu/ karmic main universe multiverse
+deb http://debian.yorku.ca/ubuntu/ karmic-updates main universe multiverse
+deb-src http://debian.yorku.ca/ubuntu/ karmic-updates main universe multiverse
+deb http://debian.yorku.ca/ubuntu/ karmic-security main universe multiverse
+deb-src http://debian.yorku.ca/ubuntu/ karmic-security main universe multiverse
+

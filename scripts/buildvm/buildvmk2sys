@@ -1,0 +1,29 @@
+#!/bin/sh
+
+# This script generates the base system image and the kswapsys binary.
+
+set -e
+
+DEST_DIR=/var/www/debian/extra/kas2.0/
+
+mkdir -p $DEST_DIR
+
+cd /teambox/
+rm -rf k2_sys k2_sys.tar.gz
+mkdir -p k2_sys
+debootstrap k2 k2_sys http://127.0.0.1/debian
+chroot k2_sys bash -c 'rm -rf /var/cache/apt/archives/*.deb'
+chroot k2_sys bash -c 'echo localhost > /etc/hostname'
+chroot k2_sys bash -c 'echo -e "127.0.0.1\tlocalhost" > /etc/hosts'
+chroot k2_sys bash -c 'echo -e "auto lo\niface lo inet loopback" > /etc/network/interfaces'
+echo "/dev/scd0 /media/cdrom0 udf,iso9660 user,noauto,exec,utf8 0 0" > k2_sys/etc/fstab
+echo "/dev/fd0 /media/floppy0 auto rw,user,noauto,exec,utf8 0 0" >> k2_sys/etc/fstab
+tar -zcvpf k2_sys.tar.gz k2_sys
+rm -rf k2_sys
+mv -f k2_sys.tar.gz $DEST_DIR
+
+cd /teambox/basevm/kswapsys
+make clean
+make
+mv -f kswapsys $DEST_DIR
+

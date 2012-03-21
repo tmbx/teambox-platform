@@ -1,0 +1,96 @@
+This file contains the packages that should be installed by default on a
+Teambox server.
+
+
+== Kernel ==
+
+ * open-vm-tools
+ * lvm2
+
+
+== Utils ==
+
+ * nano                         # Nano is less scary than vim.
+ * vim
+ * apt-file
+ * aptitude
+ * man-db
+ * wget
+ * sudo
+ * dialog
+ * (samba)
+ * smbfs
+ * iptables
+ * ldap-utils                   # Brings in ldapsearch which is useful for debugging.
+ * psmisc
+ * openssl
+ * tcpdump
+ * patch
+ * rrdtool
+ * rsync
+
+
+== Services ==
+
+ * ntp
+ * locate
+ * gpm
+ * logrotate
+ * cron
+ * syslog-ng
+ * openssh-client
+ * openssh-server 
+ * postgresql-8.4
+ * ssmtp
+ * apache2-mpm-prefork
+ * libapache2-mod-wsgi
+ * libapache2-mod-fcgid
+ 
+
+== Python ==
+
+ * python-openssl
+ * python-gnutls
+ * python-pgsql
+ * python-pygresql
+ * python-json
+ * python-psycopg2
+ * python-yaml                  # Needed for teambox-acttools.
+ * python-m2crypto              # Needed for teambox-acttools.
+
+
+== Perl ==
+
+ * libdata-buffer-perl          # teambox-knp-perl dep.
+ * libio-socket-ssl-perl        # teambox-knp-perl dep.
+ * libtemplate-perl             # teambox-knp-perl dep.
+ * libmail-sender-perl          # teambox-knp-perl dep.
+
+
+== Ruby ==
+
+ * libfcgi-ruby1.8              # tbxsosd-config dep.
+ * libpgsql-ruby                # For tbxsos-config, otherwise rails brings in the SQLite module.
+ * !libsqlite3-ruby1.8          # We don't want that one.
+ * libgettext-ruby1.8           # For tbxsos-config.
+ * rails
+
+
+== Libraries ==
+
+ * libpq5
+ * libgnutls26
+ * libgcrypt11
+ * libapr1
+ * libsasl2-2
+ * libsasl2-modules
+ * libmhash2
+ * libsqlite3-0
+ * libadns1
+ * libjpeg62
+
+
+== Misc == 
+
+ * language-pack-en
+

@@ -1,0 +1,249 @@
+#!/usr/bin/python
+
+import kprompt, getopt
+from kfile import *
+from krun import *
+from kasmodel import *
+
+# Teambox directory containing the deployment files and scripts.
+# Slash-terminated.
+teambox_dir = "/teambox/"
+
+# Name of the bootstrap ISO file. This name is used locally and remotely.
+bs_iso_name = "bootstrap.iso"
+
+# Delete the path specified recursively.
+def rm_path(path):
+    show_cmd_output(["rm", "-rf", path])
+
+# Perform a recursive copy of 'src' to 'dst'. 'src' is assumed to be a shell
+# pattern.
+def rec_copy(src, dst):
+    get_cmd_output("cp -r %s %s" % (src, dst), shell_flag=1)
+    
+class Mkvm:
+    def __init__(self):
+        
+        # Name of the VM.
+        self.vm_name = None
+
+        # ESXi host where the VM will be installed.
+        self.esxi_host = None
+
+        # Setup action to perform.
+        self.action = None
+
+        # Arguments to pass to the bootstrap script.
+        self.bootstrap_args = None
+
+        # List of configuration files to use for the 'conf' action.
+        self.conf_files = None
+
+        # Email information used for the 'conf' and 'dist' actions.
+        self.email_recs = None
+        self.email_server = None
+        self.email_user = None
+        self.email_pwd = None
+        self.email_ssl = None
+        
+        # Apt sources used for the 'conf' and 'dist' actions.
+        self.source_list = None
+        
+    # Read the INI file content.
+    def read_config(self):
+        parser = read_ini_file("config.ini")
+        
+        self.vm_name = parser.get("config", "vm_name")
+        self.esxi_host = parser.get("config", "esxi_host")
+        self.action = parser.get("config", "action")
+        self.bootstrap_args = parser.get("config", "bootstrap_args")
+        self.conf_files = parser.get("config", "conf_files").split()
+        self.email_recs = parser.get("config", "email_recs")
+        self.email_server = parser.get("config", "email_server")
+        self.email_user = parser.get("config", "email_user")
+        self.email_pwd = parser.get("config", "email_pwd")
+        self.email_ssl = parser.getint("config", "email_ssl")
+        
+        source_list = parser.items("sources")
+        source_list.sort()
+        self.source_list = []
+        for i in source_list: self.source_list.append(i[1])
+        
+        if self.action not in [ "boot", "dhcp", "conf", "dist" ]:
+            raise Exception("invalid action specified (%s)" % (self.action))
+    
+    # Write bs/ssmtp.conf.
+    def write_ssmtp_conf(self, path="bs/ssmtp.conf"):
+        s = ""
+        s += "root=postmaster\n"
+        s += "hostname=%s\n" % (self.vm_name)
+        s += "mailhub=%s\n" % (self.email_server)
+        if self.email_user: s += "AuthUser=%s\n" % (self.email_user)
+        if self.email_pwd: s += "AuthPass=%s\n" % (self.email_pwd)
+        if self.email_ssl: s += "UseSTARTTLS=Yes\n"
+        s += "FromLineOverride=Yes\n"
+        write_file_atom(path, s)
+    
+    # Make the ISO image.
+    def make_iso_image(self):
+        os.mkdir("bs")
+        write_file("bs/vm_name", self.vm_name + "\n")
+        write_file("bs/action", self.action + "\n")
+        write_file("bs/bootstrap_args", self.bootstrap_args + "\n")
+        rec_copy(teambox_dir + "deploy/*", "bs")
+        
+        if self.action == "conf":
+            RootConfigNode().save_master_config("master.cfg")
+            for p in self.conf_files: show_cmd_output(["/usr/bin/python", p])
+            os.rename("master.cfg", "bs/master.cfg")
+        
+        if self.action in [ "conf", "dist" ]:
+            s = ""
+            for i in self.source_list: s += i + "\n"
+            write_file("bs/sources.list", s)
+        
+        if self.action in [ "conf", "dist" ] and len(self.email_recs):
+            self.write_ssmtp_conf()
+            write_file("bs/email_recs", self.email_recs + "\n")
+        
+        get_cmd_output([teambox_dir + "buildvmiso", "bs", bs_iso_name])
+    
+    # Ask the confirmation to proceed.
+    def ask_confirm(self):
+        s = ""
+        s += "===============================================================================\n"
+        s += "VM name:        " + self.vm_name + "\n"
+        s += "ESXi host:      " + self.esxi_host + "\n"
+        s += "Action:         " + self.action + "\n"
+        s += "Bootstrap args: " + self.bootstrap_args + "\n"
+        
+        if os.path.isfile("bs/master.cfg"):
+            root_cfg = RootConfigNode()
+            root_cfg.load_master_config("bs/master.cfg")
+            
+            s += "Config files:   " + " ".join(self.conf_files) + "\n"
+            
+            eth0 = root_cfg.eth0
+            s += "Network config: " 
+            if eth0.method == "dhcp": s += "dhcp\n"
+            else:
+                s += "ip %s netmask %s gw %s\n" % (eth0.ip, eth0.netmask, eth0.gateway)
+                s += "DNS servers:    " + " ".join(root_cfg.dns_addr_list) + "\n"
+            
+            service_list = []
+            for name in [ "tbxsos", "freemium", "mas", "wps" ]:
+                if root_cfg[name + "_service"]: service_list.append(name)
+            s += "Services:       "  + " ".join(service_list) + "\n"
+         
+        if os.path.isfile("bs/email_recs"):
+            s += "Mail addresses: " + self.email_recs + "\n"
+            s += "Mail config:    server " + self.email_server
+            if len(self.email_user): s += ", user " + self.email_user
+            if len(self.email_pwd): s += ", pwd " + self.email_pwd
+            if self.email_ssl: s += ", use SSL"
+            s += "\n"
+            
+        if os.path.isfile("bs/sources.list"):
+            for i in self.source_list: s += "Source:         " + i + "\n"
+         
+        s += "===============================================================================\n\n"
+        sys.stdout.write(s)
+        
+        if not kprompt.get_confirm("Proceed?"): sys.exit(1)
+    
+    # Deploy the VM on ESXi.
+    def deploy_on_esxi(self):
+        ssh_host = "root@" + self.esxi_host
+        ssh_vm_path = "/kstore/" + self.vm_name + "/"
+        
+        # Obtain the absolute path to kstore.
+        print("Obtaining kstore absolute path.")
+        kstore_abs_path = append_trailing_slash(get_cmd_output(["ssh", ssh_host, "cd /kstore && pwd -P"]).strip())
+        
+        # Create the VM directory.
+        print("Creating remote VM directory.")
+        show_cmd_output(["ssh", ssh_host, "mkdir " + ssh_vm_path])
+        
+        # Write and upload the vm.vmx file.
+        print("Uploading vmx file.")
+        s = read_file(teambox_dir + "basevm/cfg/stock.vmx")
+        s += 'scsi0:0.fileName = "%s.vmdk"\n' % (self.vm_name)
+        if os.path.isfile(bs_iso_name):
+            s += 'ide1:0.deviceType = "cdrom-image"\n'
+            s += 'ide1:0.fileName = "%s%s/%s"\n' % (kstore_abs_path, self.vm_name, bs_iso_name)
+            s += 'ide1:0.startConnected = "TRUE"\n'
+        else:
+            s += 'ide1:0.deviceType = "atapi-cdrom"\n'
+            s += 'ide1:0.clientDevice = "TRUE"\n'
+            s += 'ide1:0.startConnected = "FALSE"\n'
+        s += 'displayName = "%s"\n' % (self.vm_name)
+        s += "\n"
+        write_file("vm.vmx", s)
+        show_cmd_output(["scp", "vm.vmx", ssh_host + ":" + ssh_vm_path + self.vm_name + ".vmx"])
+        
+        # Copy the ISO file.
+        if os.path.isfile(bs_iso_name):
+            print("Uploading bootstrap ISO.")
+            show_cmd_output(["scp", bs_iso_name, ssh_host + ":" + ssh_vm_path])
+       
+        # Clone the k2base vmdk.
+        print("Cloning k2base vmdk. This will be long.\n")
+        s = "vmkfstools -i /kstore/k2base.vmdk -d thin %s%s.vmdk" % (ssh_vm_path, self.vm_name)
+        show_cmd_output(["ssh", ssh_host, s])
+        
+        # Register the VM.
+        print("Registering the VM.")
+        show_cmd_output(["ssh", ssh_host, "/kstore/vmm register " + self.vm_name])
+        
+        # Power on the VM.
+        print("Powering on the VM.")
+        show_cmd_output(["ssh", ssh_host, "/kstore/vmm start " + self.vm_name])
+        
+        print("\nYour VM is now booting. Remember to remove the bootstrap ISO.\n\n")
+        
+    # Deploy the VM.
+    def run(self):
+        
+        # Read the INI file content.
+        self.read_config()
+        
+        # Clean up.
+        for p in [ "master.cfg", "bs", bs_iso_name, "vm.vmx" ]: rm_path(p)
+        
+        # Make the ISO image.
+        if self.action in [ "dhcp", "conf", "dist" ]: self.make_iso_image()
+        
+        # Ask the confirmation to proceed.
+        self.ask_confirm()
+        
+        # Deploy.
+        self.deploy_on_esxi()
+        
+def main():
+    
+    if len(sys.argv) != 1:
+        print("Usage: mkvm")
+        sys.exit(1)
+    
+    if not os.path.isfile("config.ini"):
+        print("There is no config.ini file in the current working directory.")
+        sys.exit(1)
+    
+    try:
+        Mkvm().run()
+    
+    except (KeyboardInterrupt, EOFError, SystemExit, Exception), e:
+    
+        # Raise system exit exceptions.
+        if isinstance(e, SystemExit): raise e
+        
+        # Ignore interruptions.
+        elif isinstance(e, KeyboardInterrupt) or isinstance(e, EOFError): sys.exit(1)
+         
+        # Print errors.
+        else:
+            sys.stderr.write("Error: " + str(e) + ".\n")
+            sys.exit(1)
+    
+main()
+

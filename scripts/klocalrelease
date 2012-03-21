@@ -1,0 +1,326 @@
+#!/usr/bin/env python
+
+import os, getopt, shutil, traceback
+from debian_bundle import changelog
+from kprompt import *
+from kfile import *
+from krun import *
+
+### Configuration variables. ###
+
+# Path to the local repository directory.
+local_repos_path_file = "/etc/teambox/klocalrelease_repos_path"
+if os.path.isfile(local_repos_path_file): local_repos_dir = open(local_repos_path_file).readline().strip()
+else: local_repos_dir = os.path.join(os.environ['HOME'], "repos")
+local_repos_dir = append_trailing_slash(local_repos_dir)
+
+# When no repository to build is specified, the following list of repositories
+# is used.
+local_repos_list = []
+
+# Path to the directory where reprepro operates.
+local_work_dir = append_trailing_slash("/var/www/local/debian")
+
+# Name of the Ubuntu distribution used by debootstrap.
+local_ubuntu_dist = "karmic"
+
+# Debian mirror used by cowbuilder to fetch the build dependencies.
+local_cowbuilder_mirror = "http://ketchup/debian/"
+
+# More mirror information.
+local_other_mirror = "deb http://127.0.0.1/local/debian test main"
+
+# Distribution used by cowbuilder to fetch the build dependencies.
+local_cowbuilder_dist = "k2"
+
+### End of configuration variables. ###
+
+
+# Create the directory specified if it does not exist.
+def create_dir(path):
+    if not os.path.isdir(path): get_cmd_output(["/bin/mkdir", "-p", path])
+
+# Delete the directory specified recursively.
+def delete_dir(path):
+    if os.path.isdir(path): get_cmd_output(["rm", "-rf", path])
+    
+# Release manager.
+class LocalReleaseManager:
+    def __init__(self):
+    
+        # Standard output stream. Only the 'write' method is supported.
+        self.stdout = sys.stdout
+        
+        # Standard error stream. Only the 'write' method is supported.
+        self.stderr = sys.stderr
+        
+        # Trapped exception list.
+        self.trapped_exception_list = (KeyboardInterrupt, EOFError, SystemExit, Exception)
+        
+        # True if the program should be quiet.
+        self.quiet_flag = 0
+
+        # Help strings.
+        self.global_help_str = \
+            "Teambox local release tool.\n" +\
+            "\n" +\
+            "Commands:\n" +\
+            "  help                  Show help about a command.\n" +\
+            "  init                  Initialize the local release environment.\n" +\
+            "  build                 Build the specified repositories.\n" + \
+            "\n" +\
+            "Global options:\n" +\
+            "  -h, --help [cmd]      Print help and exit.\n" +\
+            "  --show-trace          Print exception tracebacks.\n" +\
+            "\n"
+        
+        self.help_help_str = \
+            "help [command]\n" +\
+            "\n" +\
+            "Show help about a command, or list the commands supported.\n"
+
+        self.init_help_str = \
+            "klocalrelease init\n" +\
+            "\n" +\
+            "Initialize the directories used by krelease and reprepro.\n" +\
+            "WARNING: this will flush /var/www/local/debian by default!\n"
+            
+	self.build_help_str = \
+            "klocalrelease build [<repo1, repo2, ...>]\n" +\
+            "\n" +\
+            "Build the repositories specified and insert the packages generated in the\n" +\
+            "reprepro tree under the distribution 'test'. If no repository is specified, the\n" +\
+            "default list of repositories to build set in this program is used.\n"
+	
+        # Command dispatch table. The first column is the command name, the
+        # second is the number of arguments, the third is the short options
+        # accepted, the fourth is the long options accepted, the fifth is the
+        # handler function to call, the sixth is the help string. 'None' can be
+        # specified for the number of arguments when the command takes a
+        # variable number of arguments. The arguments supplied to the handler
+        # are the values returned by getopt().
+        self.cmd_dispatch_table = \
+            (("help", None, "", [], self.handle_help, self.help_help_str),
+             ("init", 0, "", [], self.handle_init, self.init_help_str),
+             ("build", None, "", [], self.handle_build, self.build_help_str))
+    
+    # Log the message specified if 'quiet_flag' is false.
+    def verbose_log(self, msg):
+	if not self.quiet_flag: self.stdout.write(msg)
+    
+    # This method implements a high-level exception handler.
+    def high_level_exception_handler(self, e, ignore_error=0, show_trace=0):
+        
+        # Raise system exit exceptions.
+        if isinstance(e, SystemExit): raise e
+        
+        # Ignore interruptions.
+        elif isinstance(e, KeyboardInterrupt) or isinstance(e, EOFError): return
+         
+        # Print errors, exit if requested.
+        else:
+            if show_trace:
+                exceptionType, exceptionValue, exceptionTraceback = sys.exc_info()
+                self.stderr.write("Trace:" + "\n")
+                for line in traceback.format_tb(exceptionTraceback):
+                    self.stderr.write(line + "\n")
+            self.stderr.write("Error: " + str(e) + ".\n")
+            if ignore_error: return
+            sys.exit(1)
+
+    # Print the program usage.
+    def print_usage(self, stream):
+        stream.write(self.global_help_str)
+
+    # Return the list of commands matching the name specified.
+    def get_cmd_list_from_name(self, name):
+        l = []
+        for entry in self.cmd_dispatch_table:
+            if entry[0].startswith(name): l.append(entry)
+        return l
+
+    # Run the specified command. This method must be passed a list containing
+    # the command name and its arguments. The method returns 0 on success, 1 on
+    # failure.
+    def run_command(self, input_arg_list):
+        cmd_list = self.get_cmd_list_from_name(input_arg_list[0])
+        if len(cmd_list) != 1:
+            if len(cmd_list) == 0:
+                self.stderr.write("No such command.\n")
+            else: 
+                self.stderr.write("Ambiguous command: ")
+                for cmd in cmd_list: self.stderr.write(cmd[0] + " ")
+                self.stderr.write("\n")
+            return 1
+            
+        cmd = cmd_list[0]
+        
+        # Parse the options of the command.
+        try: cmd_opts, cmd_args = getopt.getopt(input_arg_list[1:], cmd[2], cmd[3])
+        except getopt.GetoptError, e:
+            self.stderr.write("Command options error: %s.\n\n" % (str(e)))
+            self.stderr.write(cmd[5])
+            return 1
+       
+        # Verify the number of arguments.
+        if cmd[1] != None and cmd[1] != len(cmd_args):
+            self.stderr.write("Invalid number of arguments.\n\n")
+            self.stderr.write(cmd[5])
+            return 1
+        
+        # Call the handler.
+        cmd[4](cmd_opts, cmd_args)
+    
+    # Throw an exception if the local repository directory specified by the user
+    # does not exist.
+    def check_has_repos(self):
+        if not os.path.isdir(local_repos_dir):
+            raise Exception("you didn't set your local repository path properly")
+    
+    # Command handlers.
+    def handle_help(self, opts, args):
+        
+        # Print help about the command specified, if there is one.
+        if len(args):
+            l = self.get_cmd_list_from_name(args[0])
+            if len(l) == 0:
+                self.stdout.write("No such command.\n")
+                self.print_usage(self.stdout)
+            else:
+                first = 1
+                for cmd in l:
+                    if not first: self.stdout.write("\n")
+                    self.stdout.write(cmd[5])
+                    first = 0
+        
+        # Print global help.
+        else:
+            self.print_usage(self.stdout)
+    
+    def handle_init(self, opts, args):
+        self.check_has_repos()
+        
+        create_dir("/etc/teambox/")
+        self.verbose_log("Writing /etc/teambox/krelease.ini.\n")
+        s = \
+            "[config]\n" +\
+            "release_dir_path = " + local_work_dir + "release/\n" +\
+            "reprepro_input_path = " + local_work_dir + "\n" +\
+            "reprepro_output_path = " + local_work_dir + "\n" +\
+            "cowbuilder_mirror = " + local_cowbuilder_mirror + "\n" +\
+            "other_mirror = " + local_other_mirror + "\n" +\
+            "cowbuilder_dist = " + local_cowbuilder_dist + "\n" +\
+            "dev_dist = empty\n" +\
+            "backup_reprepro = 0\n" +\
+            "hg_fetch_host_name = nemo\n" +\
+            "hg_fetch_user_name = krelease\n" +\
+            "hg_fetch_dir_path = /home/repos/\n" +\
+            "\n"
+        write_file("/etc/teambox/krelease.ini", s)
+        
+        self.verbose_log("Setting up " + local_work_dir + ".\n")
+        delete_dir(local_work_dir)
+        create_dir(local_work_dir)
+        create_dir(local_work_dir + "conf")
+        s = \
+            "Codename: empty\n" +\
+            "Components: main\n" +\
+            "Architectures: i386 source\n" +\
+            "\n" +\
+            "Codename: test\n" +\
+            "Components: main\n" +\
+            "Architectures: i386 source\n" +\
+            "\n"
+        write_file(local_work_dir + "conf/distributions", s)
+        create_dir(local_work_dir + "release")
+        create_dir(local_work_dir + "release/empty")
+        create_dir(local_work_dir + "release/empty/repos")
+        create_dir(local_work_dir + "release/test")
+        create_dir(local_work_dir + "release/test/repos")
+        
+	debootstrap_dir_path = "/usr/share/debootstrap/scripts/"
+        
+        if not os.path.isfile(debootstrap_dir_path + "karmic"):
+            self.verbose_log("Setting debootstrap symlink for karmic.\n")
+            os.symlink(debootstrap_dir_path + "gutsy", debootstrap_dir_path + "karmic")
+        
+        self.verbose_log("Setting debootstrap symlink for empty.\n")
+        delete_file(debootstrap_dir_path + "empty")
+        os.symlink(debootstrap_dir_path + local_ubuntu_dist, debootstrap_dir_path + "empty")
+        
+        self.verbose_log("Setting debootstrap symlink for " + local_cowbuilder_dist + ".\n")
+        delete_file(debootstrap_dir_path + local_cowbuilder_dist)
+        os.symlink(debootstrap_dir_path + local_ubuntu_dist, debootstrap_dir_path + local_cowbuilder_dist)
+        
+	show_cmd_output(["krelease", "reprepro-export"])
+	
+    def handle_build(self, opts, args):
+        self.check_has_repos()
+        
+        if len(args) == 0: repos_list = local_repos_list
+        else: repos_list = args
+        
+        test_repos_dir = local_work_dir + "release/test/repos/"
+        now = str(int(time.time()))
+        
+        for r in repos_list:
+            self.verbose_log("Copying " + r + ".\n")
+            delete_dir(test_repos_dir + r)
+	    shutil.copytree(local_repos_dir + r, test_repos_dir + r)
+            
+            show_cmd_output(["krelease", "hk-update", "test", r])
+
+            self.verbose_log("Bumping changelog of " + r + ".\n")
+	    cur_dir = os.getcwd()
+	    os.chdir(test_repos_dir + r)
+
+            # Modify the Debian changelog.
+            ch = changelog.Changelog()
+            ch.parse_changelog(file("debian/changelog", "r").read(), max_blocks = 1)
+            current_version = ch.get_version()
+
+            get_cmd_output(["dch", "-v", str(current_version) + ".devel-" + now, "Testing."])
+
+	    os.chdir(cur_dir)
+            
+            show_cmd_output(["krelease", "build-pkg", "test", r])
+            show_cmd_output(["krelease", "reprepro-add-pkg", "test", r])
+
+def main():
+    help_flag = 0
+    show_trace = 0
+    
+    # Create an instance of the release manager.
+    manager = LocalReleaseManager()
+    
+    # Parse the global options.
+    try: opts, args = getopt.getopt(sys.argv[1:], "h", ["help", "show-trace"])
+    except getopt.GetoptError, e:
+	sys.stderr.write("Options error: %s.\n\n" % (str(e)))
+	manager.print_usage(sys.stderr)
+	sys.exit(1)
+    
+    for k, v in opts:
+        if k == "-h" or k == "--help": help_flag = 1
+        if k == "--show-trace": show_trace = 1
+    
+    # Handle help.
+    if help_flag:
+        manager.handle_help({}, args)
+        sys.exit(0)
+    
+    # Check if a command was supplied.
+    if not len(args):
+        sys.stderr.write("Command required. Type 'klocalrelease -h' for help.\n")
+        sys.exit(1)
+    
+    try:
+        # Run the specified command.
+        sys.exit(manager.run_command(args))
+    
+    # Handle the exceptions.
+    except manager.trapped_exception_list, e: manager.high_level_exception_handler(e, 0, show_trace)
+ 
+# Allow import of this module.
+if __name__ == "__main__": main()
+

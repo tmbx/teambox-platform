@@ -1,0 +1,13 @@
+#!/bin/sh
+
+# Rsync with the mirror at Transvision.
+
+rsync \
+	-avrz \
+	--delete \
+	--delete-excluded \
+	--exclude "pool/*/*/*/*.tar.gz" \
+	--exclude "pool/*/*/*/*.dsc" \
+	--exclude "pool/*/*/*/*.diff.gz" \
+	/var/www/debian/ root@209.222.233.250:/var/www/debian
+

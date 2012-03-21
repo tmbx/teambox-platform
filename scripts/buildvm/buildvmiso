@@ -1,0 +1,31 @@
+#!/bin/sh
+
+# This script generates the ISO image that contains the bootstrap bundle
+# specified.
+
+set -e
+
+if [ -z "$1" -o -z "$2" ]; then
+    echo "Usage: $0 <bundle_path> <iso_path>"
+    exit 1
+fi
+
+# Name of the bootstrap bundle when expanded. Add '.tgz' to get the tarball
+# name. Do not use the extension '.tar.gz'. genisoimage(1) will convert it to
+# '.tgz'. Do not use a name longer than 8 characters. It will be trimmed.
+bootstrap_bundle_name="bs"
+
+# Temporary directory used to create the ISO image.
+iso_dir_path="/tmp/bootstrap_iso/"
+
+rm -rf $iso_dir_path
+mkdir $iso_dir_path
+cp -r $1 "$iso_dir_path$bootstrap_bundle_name"
+old_pwd=`pwd`
+cd $iso_dir_path
+tar -zcvf "$bootstrap_bundle_name.tgz" $bootstrap_bundle_name
+rm -rf $bootstrap_bundle_name
+cd $old_pwd
+genisoimage -o $2 $iso_dir_path
+rm -rf $iso_dir_path
+

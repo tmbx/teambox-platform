@@ -1,0 +1,383 @@
+#!/usr/bin/python 
+
+import tempfile, getopt, shutil
+from kfile import *
+from krun import *
+
+# Help strings.
+global_help_str = \
+    "Teambox wrapper for Mercurial & Quilt.\n" +\
+    "\n" +\
+    "Commands:\n" +\
+    "  init         Create Mercurial repository and associated files.\n" +\
+    "  load         Import new upstream sources.\n" +\
+    "  update       Update repository to tip and apply Teambox patches.\n" +\
+    "\n" +\
+    "Global options:\n" +\
+    "  -h, --help [cmd]     Print help and exit.\n" +\
+    "  -v, --verbose        Be verbose.\n" +\
+    "  -q, --quiet          Don't complain if the environment is set-up wrong.\n" +\
+    "\n"
+
+init_help_str = \
+    "hk init\n" +\
+    "\n" +\
+    "Create the Mercurial repository, the series file and the .hgignore file, if\n" +\
+    "they don't already exist. The .hgignore file ignores the .pc/ directory used by\n" +\
+    "Quilt.\n"
+    
+load_help_str = \
+    "hk load <path> [-n,--no-commit]\n" +\
+    "\n" +\
+    "Import the upstream sources contained in 'path'. The upstream sources can be\n" +\
+    "placed in a directory, a tarball or a zip file.\n" +\
+    "\n" +\
+    "The previous upstream files will be deleted and replaced by the files contained\n" +\
+    "in the upstream bundle. The files present in the .hg and the Teambox patch\n" +\
+    "directory will not be affected.\n" +\
+    "\n" +\
+    "The new upstream files are automatically commited unless the '--no-commit' flag\n" +\
+    "was specified.\n"
+
+update_help_str = \
+    "hk update [-f,--force]\n" +\
+    "\n" +\
+    "Update the repository to tip and apply all Teambox patches. The applied\n" +\
+    "patches are unapplied before the operation takes place. The operation will\n" +\
+    "abort if the patches do not unapply cleanly or if there are local changes,\n" +\
+    "unless the '--force' flag was specified.\n"
+
+# Global values.
+default_kpatch_dir_name = "kpatch"
+kpatch_dir_name = "patches"
+verbose_flag = 0
+quiet_flag = 0
+
+# Append a slash to the path specified if the path is not "" and it does not end
+# with a slash.
+def append_trailing_slash(path):
+    if path != "" and not path.endswith("/"): return path + "/"
+    return path
+
+# Log the message specified if verbose_flag is true.
+def verbose_log(msg):
+    if verbose_flag: print msg
+
+# Return the list of commands matching the name specified.
+def get_cmd_list_from_name(name):
+    l = []
+    for entry in cmd_dispatch_table:
+        if entry[0].startswith(name): l.append(entry)
+    return l
+
+# Throw an exception if the current working directory does not contain a
+# mercurial repository.
+def ensure_in_repo():
+    if not os.path.isdir(".hg"): raise Exception("current working directory does not contain a Mercurial repository")
+
+# Helper class for handle_load().
+class LoadHelper:
+    def __init__(self):
+        
+        # Directory containing the files to import, if any. Must have a trailing
+        # delimiter.
+        self.import_dir = None
+        
+        # Temporary directory created while expanding the archive, if any. Must
+        # have a trailing delimiter.
+        self.tmp_dir = None
+        
+        # List of prefixes to ignore in the root directory.
+        self.ignore_list = [ kpatch_dir_name, ".hg" ]
+    
+    # Return true if the name specified should be ignored.
+    def is_ignored(self, name):
+        for prefix in self.ignore_list:
+            if name.startswith(prefix): return 1
+        return 0
+        
+    # Prepare the archive or directory path specified to be imported.
+    def prepare_source(self, import_path):
+        
+        # The path does not exist.
+        if not os.path.exists(import_path):
+            raise Exception("import path " + import_path + " does not exist")
+        
+        # Import the directory.
+        elif os.path.isdir(import_path):
+            verbose_log("Importing directory " + import_path + ".")
+            self.import_dir = append_trailing_slash(import_path)
+        
+        # Import the archive.
+        else:
+            try:
+                verbose_log("Importing archive " + import_path + ".")
+                
+                # Create a temporary directory.
+                self.import_dir = self.tmp_dir = append_trailing_slash(tempfile.mkdtemp(prefix="hk"))
+                
+                # Expand the archive.
+                cur_dir = os.getcwd()
+                try:
+                    abs_import_path = os.path.abspath(import_path)
+                    os.chdir(self.tmp_dir)
+                    if abs_import_path.endswith(".tar.gz"): get_cmd_output(["tar", "-zxf", abs_import_path])
+                    elif abs_import_path.endswith(".tar.bz2"): get_cmd_output(["tar", "-jxf", abs_import_path])
+                    elif abs_import_path.endswith(".zip"): get_cmd_output(["unzip", abs_import_path])
+                    else: raise Exception("unknown archive file type")
+                finally:
+                    os.chdir(cur_dir)
+                
+                # Check if the archive expands to a single directory.
+                dents = os.listdir(self.import_dir)
+                if len(dents) == 1 and os.path.isdir(self.import_dir + dents[0]):
+                    self.import_dir = self.import_dir + dents[0] + "/"
+            except:
+                self.clean()
+                raise
+    
+    # Remove the files populating the current working directory.
+    def prepare_dest(self):
+        
+        # Delete all files except the special files.
+        for entry in os.listdir("."):
+            
+            # Skip ignored files.
+            if self.is_ignored(entry): continue
+            
+            verbose_log("Removing " + entry + ".")
+            get_cmd_output(["rm", "-rf", entry])
+            
+    # Copy the files in the source directory to the current working directory.
+    def perform_copy(self):
+        
+        # Copy all files except the special files.
+        for entry in os.listdir(self.import_dir):
+            
+            # Skip ignored files.
+            if self.is_ignored(entry): continue
+            
+            verbose_log("Importing " + entry + ".")
+            get_cmd_output(["cp", "-r", self.import_dir + entry, "."])
+    
+    # Remove the temporary directory created during the operation, if any.
+    def clean(self):
+        if self.tmp_dir != None and os.path.isdir(self.tmp_dir): shutil.rmtree(self.tmp_dir, ignore_errors=1)
+        
+# Handle the init command.
+def handle_init(opts, args):
+    
+    # Create the Mercurial repository if required.
+    if not os.path.isdir(".hg"):
+        verbose_log("Creating Mercurial repository.") 
+        get_cmd_output(["hg", "init"])
+    
+    # Create the series file if required.
+    series_path = kpatch_dir_name + "/series"
+    if not os.path.isfile(series_path):
+        verbose_log("Creating " + series_path + " file.")
+        if not os.path.isdir(kpatch_dir_name): os.mkdir(kpatch_dir_name)
+        open(series_path, "wb").close()
+        get_cmd_output(["hg", "add", series_path])
+    
+    # Create the .hgignore file if required.
+    if not os.path.isfile(".hgignore"):
+        verbose_log("Creating .hgignore file.") 
+        f = open(".hgignore", "wb")
+        f.write("^\\.hgignore$\n")
+        f.write("^\\.pc/\n")
+        f.close()
+        get_cmd_output(["hg", "add", ".hgignore"])
+
+# Handle the load command.
+def handle_load(opts, args):
+    
+    import_path = args[0]
+    commit_flag = 1
+    
+    for k, v in opts:
+	if k == "-n" or k == "--no-commit": commit_flag = 0
+    
+    # Make sure we're inside a mercurial repository.
+    ensure_in_repo()
+    
+    helper = LoadHelper()
+    
+    try:
+        # Prepare the source.
+        helper.prepare_source(import_path)
+        
+        # Prepare the destination.
+        helper.prepare_dest()
+        
+        # Copy the files.
+        helper.perform_copy()
+    
+    finally: helper.clean()
+       
+    # Let Mercurial find the differences.
+    verbose_log(get_cmd_output(["hg", "addremove"]))
+    
+    # Commit the changes.
+    if commit_flag:
+        import_name = import_path
+        if import_name.endswith("/"): import_name = import_name[0:-1]
+        import_name = os.path.basename(import_name)
+        verbose_log(get_cmd_output(["hg", "commit", "-m", "Imported " + import_name + "."]))
+
+# Handle the update command.
+def handle_update(opts, args):
+    
+    force_flag = 0
+    
+    for k, v in opts:
+	if k == "-f" or k == "--force": force_flag = 1
+     
+    series_path = kpatch_dir_name + "/series"
+    applied_path = ".pc/applied-patches"
+    
+    # Make sure we're inside a mercurial repository.
+    ensure_in_repo()
+    
+    # Forced behavior.
+    if force_flag:
+        verbose_log("Reverting repository.")
+        get_cmd_output(["hg", "update", "-C", "tip"])
+        get_cmd_output(["hg", "purge", "--all"])
+        
+    # Non-forced behavior.
+    else:
+        # Unapply all patches.
+        verbose_log("Unapplying patches.")
+        try: get_cmd_output(["quilt", "pop", "-a"])
+        except: pass
+        
+        # Check if there are applied patches.
+        if os.path.isfile(".pc/applied-patches"): raise Exception("cannot unapply patches")
+        
+        # Check if there are local modifications.
+        if get_cmd_output(["hg", "status"]) != "": raise Exception("local modifications detected")
+        
+        # Update to 'tip'.
+        verbose_log("Updating to tip.")
+        get_cmd_output(["hg", "update", "tip"])
+        
+    # Apply the patches.
+    verbose_log("Applying patches.")
+    try: sys.stdout.write(get_cmd_output(["quilt", "push", "-a"]))
+    except: pass
+    
+    # Check if all patches have been applied.
+    if os.path.isfile(series_path) and os.path.getsize(series_path):
+        try: get_cmd_output(["diff", series_path, applied_path])
+        except: raise Exception("cannot apply patches")
+    
+# Print the program usage.
+def print_usage(stream):
+    stream.write(global_help_str)
+
+def main():
+    global kpatch_dir_name
+    global verbose_flag
+    global quiet_flag
+    
+    help_flag = 0
+    
+    # Parse the global options.
+    try: opts, args = getopt.getopt(sys.argv[1:], "hvq:", ["help", "verbose", "quiet"])
+    except getopt.GetoptError, e:
+	sys.stderr.write("Options error: %s.\n\n" % (str(e)))
+	print_usage(sys.stderr)
+	sys.exit(1)
+    
+    for k, v in opts:
+	if k == "-h" or k == "--help":
+            help_flag = 1
+	elif k == "-v" or k == "--verbose":
+	    verbose_flag = 1
+	elif k == "-q" or k == "--quiet":
+	    quiet_flag = 1
+    
+    # Handle help.
+    if help_flag:
+    
+        # Print help about the command specified, if there is one.
+        if len(args):
+            l = get_cmd_list_from_name(args[0])
+            if len(l) == 0:
+                sys.stdout.write("No such command.\n")
+                print_usage(sys.stdout)
+            else:
+                for cmd in l:
+                    sys.stdout.write(cmd[5])
+                    sys.stdout.write("\n")
+        
+        # Print global help.
+        else:
+	    print_usage(sys.stdout)
+        
+        sys.exit(0)
+    
+    # Get the value of Quilt's patch environment variable, if it is set.
+    if os.environ.has_key("QUILT_PATCHES"):
+        kpatch_dir_name = os.environ["QUILT_PATCHES"]
+    
+    # Abort if the kpatch_dir_name is not equal to the default value and the
+    # quiet flag is not set.
+    if not quiet_flag and kpatch_dir_name != default_kpatch_dir_name:
+        s = "Warning: Quilt is currently using directory '" + kpatch_dir_name + "'.\n" +\
+            "\n" +\
+            "Run the following command to update your environment:\n" +\
+            "export QUILT_PATCHES=kpatch\n" +\
+            "\n" +\
+            "You can suppress this message by specifying --quiet.\n"
+        sys.stderr.write(s)
+        sys.exit(1)
+        
+    # Retrieve the command specified.
+    if not len(args):
+        sys.stderr.write("Command required. Type 'hk -h' for help.\n")
+        sys.exit(0)
+    
+    cmd_list = get_cmd_list_from_name(args[0])
+    if len(cmd_list) != 1:
+        if len(cmd_list) == 0:
+            sys.stderr.write("No such command.\n")
+        else: 
+            sys.stderr.write("Ambiguous command: ")
+            for cmd in cmd_list: sys.stderr.write(cmd[0] + " ")
+            sys.stderr.write("\n")
+        sys.exit(1)
+    cmd = cmd_list[0]
+    
+    # Parse the options of the command.
+    try: cmd_opts, cmd_args = getopt.getopt(args[1:], cmd[2], cmd[3])
+    except getopt.GetoptError, e:
+	sys.stderr.write("Command options error: %s.\n\n" % (str(e)))
+        sys.stderr.write(cmd[5])
+	sys.exit(1)
+   
+    # Verify the number of arguments.
+    if cmd[1] != None and cmd[1] != len(cmd_args):
+        sys.stderr.write("Invalid number of arguments.\n\n")
+        sys.stderr.write(cmd[5])
+	sys.exit(1)
+    
+    # Call the handler.
+    try: cmd[4](cmd_opts, cmd_args)
+    except Exception, e:
+        sys.stderr.write("Error: " + str(e) + ".\n")
+        sys.exit(1)
+        
+# Command dispatch table. The first column is the command name, the second is
+# the number of arguments, the third is the short options accepted, the fourth
+# is the long options accepted, the fifth is the handler function to call, the
+# sixth is the help string. 'None' can be specified for the number of arguments
+# when the command takes a variable number of arguments. The arguments supplied
+# to the handler are the values returned by getopt().
+cmd_dispatch_table = (("init", 0, "", [], handle_init, init_help_str),
+                      ("load", 1, "n", ["no-commit"], handle_load, load_help_str),
+                      ("update", 0, "f", ["force"], handle_update, update_help_str))
+
+main()
+

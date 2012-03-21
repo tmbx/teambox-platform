@@ -1,0 +1,304 @@
+This document describes the procedure to follow to make a release of the
+Teambox backend software.
+
+
+===============================================================================
+What is a software release:
+
+* The set of all packages, source and binary, that are installed on a VM.
+* The environment required to build those packages.
+* The set of scripts used to upgrade the previous releases to the current
+  release.
+
+
+Types of packages:
+
+* Pristine Debian packages:
+
+These packages are entirely maintained by the Debian folks. We install them
+with no modifications. We sometimes configure them with Teambox packages after
+they have been installed.
+
+* Modified Debian packages:
+
+These packages are provided by the Debian folks but we modify them for our own
+purposes. The modifications we make are stored in patches that we apply with
+Quilt. We have developed a script called 'hk' to make this process easier. See
+its documentation for details.
+
+* Teambox packages:
+
+These packages are maintained solely by Teambox.
+
+
+Reprepro:
+
+We use reprepro(1) to manage our software releases. Reprepro is used for four
+purposes:
+
+* Keeping track of the packages included in each release:
+
+We create a new Debian distribution each time we make a release. This
+distribution specifies the name and the version of every package that is part
+of the release. That is important bookkeeping information.
+
+* Installing and upgrading the packages of a VM:
+
+With the distributions exported by reprepro, we can use the standard Debian
+tools to install / upgrade the Debian packages used by a VM.
+
+* Storing the content of the Debian packages optimally. 
+
+Reprepro uses a single repository to store the content of the packages of all
+distributions. If two distributions use the same version of a package, only one
+copy of the package is stored in the repository. This dramatically reduces the
+amount of space required to store the artifacts of a release.
+
+* Detecting errors.
+
+Reprepro refuses to add the same version of a package twice in its repository.
+This helps to detect versioning errors in the packages we maintain.
+
+
+dpkg-buildpackage and cowbuilder:
+
+We use dpkg-buildpackage(1) to generate the source control files of the Debian
+packages of a release. A source control file specifies how to build a Debian
+package.
+
+We use cowbuilder(8) to generate the individual '.deb' files provided by a
+Debian source package. cowbuilder performs this work by setting up a bare-bone
+filesystem that has only the minimal set of packages required to build the
+package and then by compiling the sources of the package. The packages built by
+cowbuilder are "clean" in the sense that they do not depend on the environment
+of the machine where cowbuilder is invoked. The packages installed by
+cowbuilder are downloaded from a Debian distribution. For maximal consistency
+we build the packages of a release using the packages provided by the release.
+
+
+Debian package versioning scheme:
+
+* Pristine Debian packages:
+
+We do not change the version number of these packages.
+
+* Modified Debian packages:
+
+We append "teamboxX", where X is an incremental version number, to the version
+number of the packages provided by the Debian folks. For instance,
+'2.2.9-7ubuntu3teambox1'. By convention the incremental version number
+appended by Teambox is reset to 1 when the upstream version is incremented.
+
+IMPORTANT: do NOT append a hyphen (-) to the version number if it already
+contains one. This breaks the comparison algorithm used by Debian.
+
+* Teambox packages:
+
+We use a single incremental number as a version number of the package, e.g.
+'25'. This number must be incremented every time the package is ready for
+distribution.
+
+
+KAS release versioning scheme:
+
+The KAS releases are identified with the string 'kas' and two numbers, e.g.
+'kas1.2'.
+
+
+KAS release compatibility:
+
+We maintain full backward compatibility with the previous releases of the KAS.
+We use upgrade scripts to pass from one version to the next, e.g. from kas1.2
+to kas1.3. Once written, these scripts generally need not ever be modified
+since their execution environment never changes.
+
+
+KAS release artifacts:
+
+We store the artifacts of a release 'X' under the directory
+'/var/krelease/release/X/'. The following directory structure is used:
+
+X/
+X/repos/
+X/repos/kas
+X/repos/kas/setup/
+X/repos/kas/setup/new
+X/repos/kas/setup/upgrade
+X/repos/kweb
+X/build/
+X/build/cow/
+X/build/dsc/
+X/build/deb/
+X/img/
+
+The 'repos/' directory contains a copy of the Mercurial repositories of the
+Teambox packages included in the release for bookkeeping purposes. These
+repositories are never modified once they have been created. If a repository
+isn't modified by a subsequent release, then it is not necessary to include it.
+
+The 'teambox-console-setup' repository is used to create fresh VM images and
+to update existing machines. The 'new' directory contains the scripts required
+to create a fresh VM and the 'update' directory contains the scripts used to
+update a machine.
+
+The 'build' directory is used by the 'krelease' script to build the Debian
+packages. The 'cow/' directory contains the filesystem used by cowbuilder, the
+'dsc/' directory contains the source control files and the 'deb/' directory
+contains the '.deb' files.
+
+The 'img/' directory contains the VMware images generated for the release.
+
+
+Debian distribution management:
+
+We use three levels of Debian distributions.
+
+* The official Ubuntu distribution:
+
+We obtain most of the packages directly from an Ubuntu distribution, e.g.
+Karmic. The list of the packages we are interested in is stored in a file. The
+dependencies of those packages are computed automatically with germinate(1).
+
+* The Teambox development distribution (k2):
+
+This distribution contains the subset of the pristine Debian packages computed
+by germinate(1) and the latest semi-stable version of the modified Debian
+packages and the Teambox packages. The development distribution can be updated
+at any time without affecting the production distributions.
+
+* The production distributions:
+
+We keep one production distribution per release. The distribution of a release
+is created by copying the k2 distribution once it is ready to be released.
+
+
+The 'krelease' script:
+
+The 'krelease' script manages the software releases. All its commands are fully
+documented and therefore they won't be described here. Run the program with the
+'-h' flag for details.
+
+Note that the 'update-release' command is idempotent. The 'new-release' command
+is also idempotent UNLESS a subsequent release has been made since the command
+was run.
+
+
+===============================================================================
+How to build the release VM and the base system VM:
+
+In these instructions the release VM is called 'ketchupng' and the base system
+VM is called 'k2base'.
+
+Create a new VM called 'ketchupng' and install the latest Ubuntu version on it.
+
+On your local machine go in your 'repos' directory and hg clone the kpython,
+teambox-platform, teambox-console-setup and teambox-meta packages from Nemo.
+
+Prepare and push the file bundle on ketchupng:
+$ export BUILD_VM_IP=ketchupng
+$ cd ~/repos/teambox-platform/scripts
+$ ./buildvmpush $BUILD_VM_IP
+
+Setup ketchupng:
+$ ssh root@$BUILD_VM_IP
+$ vi .bashrc
+export PATH="$PATH:/teambox"
+$ exec bash
+$ buildvmsetup
+  Merge /teambox/cfg/distributions with
+        /var/krelease/reprepro/conf/distributions if it has changed.
+$ ssh-keygen -t dsa
+$ ssh-copy-id -i /root/.ssh/id_dsa.pub krelease@nemo
+
+Note that buildvmpush and buildvmsetup must be reexecuted when the content of
+teambox-platform changes.
+
+Build the development distribution:
+$ krelease system-update
+$ cd /root/release/k2/repos
+$ mkdir -p apt-bundle kas kctl kmod kpylons kpython teambox-acttools \
+           teambox-console-setup tbxsosd tbxsosd-db teambox-meta \
+           kweb libktools tagcrypt tbxsos-config tbxsos-stats tbxsos-utils \
+           tbxsos-xmlrpc postgresql-8.4 ssmtp util-linux
+  Adjust the package list above if necessary.
+$ krelease hg-fetch k2
+$ krelease update-release
+
+Rebase all the packages flagged by krelease. Refer to the 'hk' documentation
+for details.
+
+Import the distributions from the old ketchup machine:
+$ cd /var/krelease/reprepro/
+$ buildvmk1
+$ cp -r conf new_conf
+$ cat k1.perm_dist >> new_conf/distributions
+$ cat k1.tmp_dist >> conf/distributions
+$ cat k1.updates >> conf/updates
+  Edit conf/updates if the old release machine is not called 'ketchup'.
+$ for i in `seq 2 10`; do echo "Getting $i"; reprepro update kas1.$i; done
+$ rm -rf conf k1.*
+$ mv new_conf conf
+$ rsync --rsh=ssh -avz root@ketchup:'release/{kas*,tbxsos*}' /var/krelease/release/
+
+Prepare the k2 base system:
+$ buildvmk2sys
+
+Create a new VM called 'k2base' and install the latest Ubuntu version on it.
+Use LVM and create one root partition and one swap partition (no boot
+partition).
+
+Setup k2base:
+$ export THIS_VM_IP=ketchupng
+$ export BASE_VM_IP=k2base
+$ ssh-copy-id -i /root/.ssh/id_dsa.pub root@$BASE_VM_IP
+$ echo "deb http://$THIS_VM_IP/debian k2 main" > /teambox/k2_base_sources.list
+$ buildvmbase $BASE_VM_IP
+
+
+===============================================================================
+How to build packages on your workstation:
+
+The 'klocalrelease' script can be used to setup a small Debian package
+repository on a development machine to test the packages being developed.
+
+Procedure:
+1) Install the Debian packages listed in
+   teambox-platform/scripts/buildvm/buildvmsetup.
+2) Create a symlink for krelease and klocalrelease in /usr/bin/.
+3) Create a symlink for scripts/buildvm/cfg/hooks in /var/cache/pbuilder/.
+3) Execute 'klocalrelease init'.
+   WARNING: this will flush /var/www/local/debian/.
+4) Execute 'klocalrelease build X' where X is the list of packages to build.
+
+The changelog version of the local packages will be set to the value of the
+current incremental version number appended with the current date, in seconds.
+The packages stored on the development machine thus supercede those built on
+the official release machine that have the same incremental version number, but
+not those that have a higher incremental version number.
+
+
+===============================================================================
+How to update the development distribution (k2):
+
+1) Bump the changelog version of the relevant Mercurial repositories on Nemo.
+2) Execute 'krelease hg-fetch k2'.
+3) Execute 'krelease update-release'.
+
+krelease will pull the latest version of all repositories from Nemo, apply the
+Teambox patches if necessary and build and import all the packages that have a
+newer version.
+
+
+===============================================================================
+How to make a new release 'X':
+
+1) Update the development distribution as discussed above.
+2) Create the new release directory '/root/release/X'.
+3) Create an empty directory in the 'repos/' directory for each repository that
+   has changed since the previous release. krelease will pull those
+   repositories from Nemo for reference.
+4) Execute 'krelease new-release X' where 'X' is the name of the new release.
+   Normally no package should be built in this step since all the packages are
+   up-to-date in the development distribution.
+5) Generate the VM images with X/img/, if desired.
+

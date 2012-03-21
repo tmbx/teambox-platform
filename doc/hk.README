@@ -1,0 +1,147 @@
+This file describes the procedure to follow to modify a Debian package which
+does not originate from Teambox.
+
+1) Install Quilt. Play with it. Understand it.
+
+$ sudo apt-get install quilt
+
+2) Install the program scripts/hk on your system.
+
+$ sudo cp scripts/hk /usr/bin/
+
+3) Create a new directory that will contain the modified package.
+
+$ mkdir mypkg
+$ cd mypkg
+
+4) The default directory used by Quilt to store the patches is 'patches'. Since
+   this name is too generic, we use the name 'kpatch' instead. Quilt must be
+   instructed to use this name with the QUILT_PATCHES environment variable.
+   
+$ hk
+Warning: Quilt is currently using directory 'patches'.
+
+Run the following command to update your environment:
+export QUILT_PATCHES=kpatch
+
+You can suppress this message by specifying --quiet.
+
+$ export QUILT_PATCHES=kpatch
+$ hk
+Command required. Type 'hk -h' for help.
+
+5) Prepare the repository to contain the upstream sources and the patches.
+
+$ hk -v init
+Creating Mercurial repository.
+Creating kpatch/series file.
+Creating .hgignore file.
+
+$ hg status
+A .hgignore
+A kpatch/series
+
+6) Import the upstream sources.
+
+$ hk load ../pkg-1.0.tar.gz
+$ hg log
+changeset:   0:f73276797994
+tag:         tip
+user:        patch@teambox.co
+date:        Wed Nov 12 12:21:21 2008 -0500
+summary:     Imported pkg-1.0.tar.gz.
+
+7) Create your patch. In this example the NEWS file is modified.
+
+$ quilt new teambox.patch
+Patch teambox.patch is now on top
+
+$ quilt add NEWS
+File NEWS added to patch teambox.patch
+
+$ vi NEWS
+$ quilt refresh
+Refreshed patch teambox.patch
+
+$ quilt diff
+Index: mypkg/NEWS
+===================================================================
+--- mypkg.orig/NEWS     2008-11-12 12:28:56.000000000 -0500
++++ mypkg/NEWS  2008-11-12 12:29:10.000000000 -0500
+@@ -3,6 +3,8 @@
+
+  * Made the RNG immune against fork without exec.
+
++ * Added a line here.
++
+  * Minor changes to some function declarations.  Buffer arguments are
+    now typed as void pointer.  This should not affect any compilation.
+
+$ echo 'I shall patch the changelog and append a new entry ending by "-teambox1".'
+$ quilt add debian/changelog
+$ dch -l '-teambox' -m "Added Teambox patch"
+$ quilt refresh
+
+$ quilt pop -a
+
+Removing patch teambox.patch
+Restoring NEWS
+Restoring debian/changelog
+
+No patches applied
+
+$ hg add kpatch/teambox.patch
+
+$ echo "I shall not commit changes to the upstream sources."
+
+$ hg status
+M kpatch/series
+A kpatch/teambox.patch
+
+$ hg commit -m "Added Teambox patch"
+
+7) Update the upstream sources.
+
+$ hk load ../pkg-2.0.tar.bz2
+
+8) Rebase the patches if they apply with fuzz.
+
+$ hk update
+
+Applying patch teambox.patch
+patching file NEWS
+Hunk #1 succeeded at 149 with fuzz 2 (offset 146 lines).
+
+Now at patch teambox.patch
+
+$ quilt diff
+
+Index: mypkg/NEWS
+===================================================================
+--- mypkg.orig/NEWS     2008-11-12 12:50:33.000000000 -0500
++++ mypkg/NEWS  2008-11-12 12:51:20.000000000 -0500
+@@ -149,6 +149,8 @@
+  * New control code GCRYCTL_PRINT_CONFIG to print the build
+    configuration.
+
++ * Added a line here.
++
+  * Minor changes to some function declarations.  Buffer arguments are
+    now typed as void pointer.  This should not affect any compilation.
+    Fixed two bugs in return values and clarified documentation.
+
+$ vi NEWS
+$ quilt refresh
+Refreshed patch teambox.patch
+
+$ quilt pop -a
+Removing patch teambox.patch
+Restoring NEWS
+
+No patches applied
+
+$ hg status
+M kpatch/teambox.patch
+
+$ hg commit -m "Rebased Teambox patch againt new upstream version"
+

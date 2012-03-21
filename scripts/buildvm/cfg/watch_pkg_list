@@ -1,0 +1,9 @@
+util-linux
+postgresql-8.4
+ssmtp
+apache2
+syslog-ng
+udev
+findutils
+man-db
+base-files

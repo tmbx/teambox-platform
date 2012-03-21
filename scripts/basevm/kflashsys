@@ -1,0 +1,208 @@
+#!/usr/bin/python
+
+# This script flashes the base system image on the system running this script.
+# This is violent; keep away from childen under 13.
+
+# Notes:
+# /boot may or may not be on its own partition.
+
+from kfile import *
+from krun import *
+
+# Flash directory. Must end with a slash.
+flash_dir = None
+
+# Name of the old system.
+old_sys_name = "oldsys"
+
+# Name of the new system. The directory must already exist.
+new_sys_name = "k2_sys"
+
+# List of paths to remove in the old system before the flash.
+remove_path_list = [ "/boot/*", "/initrd", "/initrd.img", "/vmlinuz" ]
+
+# List of paths to copy in the new system before the flash.
+copy_path_list_1 = [ "/boot/*", "/etc/apt/sources.list", "/root/.ssh", "/etc/rc2.d/S99nextboot" ]
+
+# List of paths to copy in the new system after the Debian packages have been
+# installed.
+copy_path_list_2 = [ "/etc/ssh/ssh_host*", "/etc/hostname" ]
+
+# List of paths to swap between the old system and the new system.
+swap_path_list = [ "bin", "dev", "etc", "home", "lib", "opt", "root", "sbin", 
+                   "srv", "usr", "var" ]
+
+# List of filesystems to move before and after the system swap. The first field
+# is the mount point, ending with a slash. The second field is true if the mount
+# point must be restored after the swap, if the filesystem is actually mounted.
+# Order matters here, filesystems are moved in listed order and moved back in
+# reverse order.
+mount_path_list = [
+    [ "/dev/shm/", 1 ],
+    [ "/dev/pts/", 1 ],
+    [ "/dev/", 1 ],
+    [ "/var/run/", 1],
+    [ "/var/lock/", 1],
+    [ "/lib/init/rw/", 0],
+    [ "/boot/", 0]
+]
+reverse_mount_path_list = list(mount_path_list)
+reverse_mount_path_list.reverse()
+    
+# Set the system paths.
+old_sys_dir = "/" + old_sys_name + "/"
+new_sys_dir = "/" + new_sys_name + "/"
+mp_tmp_dir = old_sys_dir + "mp/"
+    
+
+# Delete the path specified recursively.
+def rm_path(path):
+    show_cmd_output(["rm", "-rf", path])
+
+# Perform a recursive copy of 'src' to 'dst'. 'src' is assumed to be a shell
+# pattern.
+def rec_copy(src, dst):
+    show_cmd_output("cp -r %s %s" % (src, dst), shell_flag=1)
+
+# Parse the mount file specified and return the list of mount fields (6 fields
+# per list element).
+def parse_mount_file(path):
+    l = []
+    for line in read_file(path).split("\n"):
+        if line == "" or re.match("\s*#", line): continue
+        fields = line.split()
+        if len(fields) != 6: raise Exception("cannot parse %s, invalid number of fields" % (path))
+        l.append(fields)
+    return l
+
+# Return a dictionary keyed by mounted filesystem path, ending with a slash.
+def get_mount_dict():
+    mount_dict = {}
+    for fields in parse_mount_file("/proc/mounts"):
+        mount_point = fields[1]
+        if not mount_point.endswith("/"): mount_point += "/"
+        mount_dict[mount_point] = 1
+    return mount_dict
+
+# Return true if the specified mount entry is persistent, i.e. it should taken
+# from the old system.
+def is_mount_entry_persistent(fields):
+    mount_point = fields[1]
+    mount_type = fields[2]
+    return (mount_point == "/" or mount_point.startswith("/boot") or mount_type == "swap")
+
+# Merge the /etc/fstab files before the flash.
+def merge_etc_fstab():
+    new_file_path = new_sys_dir + "etc/fstab"
+    old_list = parse_mount_file("/etc/fstab")
+    new_list = parse_mount_file(new_file_path)
+    merge_list = []
+    merge_result = ""
+    for fields in old_list:
+        if is_mount_entry_persistent(fields): merge_list.append(fields)
+    for fields in new_list:
+        if not is_mount_entry_persistent(fields): merge_list.append(fields)
+    for fields in merge_list:
+        merge_result += "\t".join(fields) + "\n"
+    write_file(new_file_path, merge_result)
+
+# Merge the /etc/shadow files before the flash. This copies the root password.
+def merge_etc_shadow():
+    new_file_path = new_sys_dir + "etc/shadow"
+    root_pw = "*"
+    merge_result = ""
+    for line in read_file("/etc/shadow").split("\n"):
+        fields = line.split(":")
+        if fields[0] == "root": root_pw = fields[1]
+    for line in read_file(new_file_path).split("\n"):
+        fields = line.split(":")
+        if fields[0] == "root": fields[1] = root_pw
+        merge_result += ":".join(fields) + "\n"
+    write_file(new_file_path, merge_result)
+
+# Merge the /etc/ssh/sshd_config files after the flash.
+def merge_sshd_config():
+    new_file_path = "/etc/ssh/sshd_config"
+    old_sys_path = old_sys_dir + new_file_path
+    allow_res = ""
+    for line in read_file(old_sys_path).split("\n"):
+        if line.startswith("AllowUsers"): allow_res += line + "\n"
+    write_file(new_file_path, read_file(new_file_path) + allow_res)
+
+# Return the temporary name of a mount point during the filesystem moves.
+def mount_point_tmp_name(mount_point):
+    return mount_point.replace("/", "")
+
+def main():
+    global flash_dir
+    
+    if len(sys.argv) != 2:
+        print("Usage: kflashsys <flash directory>")
+        sys.exit(1)
+    
+    flash_dir = append_trailing_slash(sys.argv[1])
+    
+    # Change the directory to '/' to avoid troubles.
+    os.chdir("/");
+    
+    # Get the mounted filesystems dictionary.
+    mount_dict = get_mount_dict()
+    
+    # Create the old system directory.
+    os.mkdir(old_sys_dir)
+    assert_dir_exist(new_sys_dir)
+    
+    # Move old paths out of the way.
+    for p in remove_path_list:
+        if os.path.exists(p):
+            show_cmd_output(["mv", p, old_sys_dir])
+    
+    # Copy paths from the old system to the new system.
+    for p in copy_path_list_1:
+        new_p = new_sys_dir + p
+        rm_path(new_p)
+        rec_copy(p, os.path.dirname(new_p)) # dirname() may apply on '*' pattern.
+    
+    # Merge some system files.
+    merge_etc_fstab()
+    merge_etc_shadow()
+    
+    # Move the mounted filesystems out of the way.
+    for mp, restore in mount_path_list:
+        if mp in mount_dict:
+            mp_tmp_path = mp_tmp_dir + mount_point_tmp_name(mp)
+            show_cmd_output(["/bin/mkdir", "-p", mp_tmp_path])
+            show_cmd_output(["/bin/mount", "--move", mp, mp_tmp_path])
+     
+    # Swap the new system in.
+    show_cmd_output([flash_dir + "kswapsys", old_sys_dir, new_sys_dir] + swap_path_list)
+    
+    # Restore the mounted filesystems.
+    for mp, restore in reverse_mount_path_list:
+        if mp in mount_dict and restore:
+            mp_tmp_path = mp_tmp_dir + mount_point_tmp_name(mp)
+            show_cmd_output(["/bin/mount", "--move", mp_tmp_path, mp])
+   
+    # Regenerate /etc/mtab. Cat the content here.
+    show_cmd_output("cat /proc/mounts > /etc/mtab", shell_flag=1)
+    
+    # Install some missing critical packages.
+    show_cmd_output("apt-get update")
+    show_cmd_output("env LANG=C LC_ALL=C LANGUAGE=C DEBIAN_FRONTEND=noninteractive DEBIAN_PRIORITY=critical " +\
+                    "apt-get --force-yes -y -o DPkg::Options::=--force-confdef install lvm2 linux-generic openssh-server grub-pc")
+    
+    # Copy paths from the old system to the new system.
+    for p in copy_path_list_2:
+        old_p = old_sys_dir + p
+        rm_path(p)
+        rec_copy(old_p, os.path.dirname(p)) # dirname() may apply on '*' pattern.
+    
+    # Merge some system files.
+    merge_sshd_config()
+    
+    # Install grub.
+    show_cmd_output(["update-grub"])
+    show_cmd_output(["grub-install", "/dev/sda"])
+    
+main()
+

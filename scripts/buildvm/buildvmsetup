@@ -1,0 +1,38 @@
+#!/bin/sh
+
+# This script setups the build VM for production. This script should be run on
+# install and on update.
+
+set -e
+
+cd /teambox
+mkdir -p /etc/teambox
+mkdir -p /var/krelease/release/k2/repos
+mkdir -p /var/krelease/reprepro/conf
+mkdir -p /var/www/debian/dists
+mkdir -p /var/www/debian/lists
+mkdir -p /var/www/debian/pool
+ln -sf /var/www/debian/dists/ /var/krelease/reprepro
+ln -sf /var/www/debian/lists/ /var/krelease/reprepro
+ln -sf /var/www/debian/pool/ /var/krelease/reprepro
+ln -sf /var/krelease/release /root
+ln -sf /var/krelease/reprepro /root
+ln -sf /teambox/cfg/hooks /var/cache/pbuilder/
+cp -f cfg/.hgrc /root
+cp -f cfg/sources.list /etc/apt
+cp -f cfg/watch_pkg_list /var/krelease/reprepro/
+
+# Don't clobber that one.
+if [ ! -f /var/krelease/reprepro/conf/distributions ]; then
+    cp -f cfg/distributions cfg/updates /var/krelease/reprepro/conf
+fi
+
+rm -rf /var/krelease/seeds
+cp -r cfg/seeds /var/krelease
+./krelease default-config > /etc/teambox/krelease.ini
+apt-get update
+apt-get --force-yes -y dist-upgrade
+apt-get --force-yes -y install vim apache2 reprepro germinate cowdancer dpkg-dev fakeroot debootstrap debhelper mercurial quilt make gcc genisoimage apt-file devscripts python-debian python-apt python-pygresql python-pgsql libc6-dev
+rm -f /var/www/index.html
+ln -sf /usr/share/debootstrap/scripts/karmic /usr/share/debootstrap/scripts/k2
+

@@ -1,0 +1,8 @@
+feature follow-recommends
+boot:
+required: boot
+minimal: required
+standard: minimal
+teambox.minimal: standard
+teambox.supported: teambox.minimal
+

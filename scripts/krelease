@@ -1,0 +1,1170 @@
+#!/usr/bin/env python
+
+import getopt, shutil
+from kprompt import *
+from ksort import *
+from kfile import *
+from krun import *
+from kodict import *
+
+# Create the directory specified if it does not exist.
+def create_dir(path):
+    if not os.path.isdir(path): os.mkdir(path)
+
+# Return true if the directory specified is empty.
+def is_dir_empty(path):
+    return not len(os.listdir(path))
+
+# Delete all the files contained in the directory specified.
+def make_dir_empty(path):
+    for file in os.listdir(path):
+	file_path = os.path.join(path, file)
+	if os.path.isfile(file_path): os.unlink(file_path)
+	else: delete_dir(file_path)
+
+# Delete the directory specified recursively.
+def delete_dir(path):
+    if os.path.isdir(path): get_cmd_output(["rm", "-rf", path])
+    
+# This class represents a single release of the product.
+class SingleRelease:
+    def __init__(self, manager, name):
+	
+	# Reference to the manager.
+	self.manager = manager
+	
+	# Name of the release.
+	self.name = name
+	
+	# Path to the release root directory.
+	self.root_dir = self.manager.release_dir_path + name + "/"
+	
+	# Path to the release repository directory.
+	self.repos_dir = self.root_dir + "repos/"
+	
+	# Path to the release build directory.
+	self.build_dir = self.root_dir + "build/"
+    
+    # Return the path to the directory of the specified repository.
+    def get_repos_path(self, name):
+	return self.repos_dir + name + "/"
+    
+    # Return the list of repositories in the release.
+    def get_repos_list(self):
+	l = []
+	file_list = os.listdir(self.repos_dir)
+	for file in file_list:
+	    if os.path.isdir(self.repos_dir + file): l.append(file)
+	l.sort()
+	return l
+    
+    # Filter the list of repositories specified using the criterias specified.
+    # The criterias with the value 'None' are ignored.
+    def filter_repos_list(self, repos_list, empty=None, hg=None, debchangelog=None, kpatch=None, indist=None):
+        
+	# I wish Python had a 'xor' operator.
+	def criteria_apply(criteria, value):
+	    return (criteria and value) or (not criteria and not value)
+	
+	l = []
+	for r in repos_list:
+	    repos_path = self.get_repos_path(r)
+	    if empty != None and not criteria_apply(empty, is_dir_empty(repos_path)): continue
+	    if hg != None and not criteria_apply(hg, os.path.isdir(repos_path + ".hg")): continue
+	    if debchangelog != None and \
+               not criteria_apply(hg, os.path.isfile(repos_path + "debian/changelog")): continue
+	    if kpatch != None and not criteria_apply(kpatch, os.path.isdir(repos_path + "kpatch")): continue
+	    if indist != None and not criteria_apply(indist, self.is_repos_in_dist(r, self.name)): continue
+	    l.append(r)
+	return l
+	
+    # Parse the changelog of the repository specified and return a tuple with
+    # three elements: package name, version and distribution name.
+    def parse_repos_changelog(self, name):
+	changelog_path = self.get_repos_path(name) + "debian/changelog"
+	first_line = open(changelog_path).readline()
+	match = re.match("^(\S+) \((\S+)\) (\S+);", first_line)
+	if not match: raise Exception("failed to parse changelog of " + name)
+	return (match.group(1), match.group(2), match.group(3))
+    
+    # Parse the Debian control file of the repository specified and return a tuple with
+    # two elements:
+    # - List of binary package names provided by the source package.
+    # - List of binary package names that are in the build dependencies.
+    def parse_repos_control_file(self, repos_name):
+        provide_list = []
+        depend_list = []
+        for line in read_file(self.get_repos_path(repos_name) + "debian/control").split("\n"):
+            match = re.match("^Build-Depends:(.*)$", line)
+            if match:
+                s = match.group(1)
+                s = re.sub("\(.*\)", "", s)
+                s = re.sub("\s+", "", s)
+                depend_list += s.split(",")
+            match = re.match("^Package:\s*([\w-]+)\s*$", line)
+            if match:
+                provide_list.append(match.group(1))
+        return (provide_list, depend_list)
+    
+    # Return the version of the source Debian package associated to the
+    # repository specified in the distribution specified, if any.
+    def get_repos_version_in_dist(self, repos_name, dist_name):
+	(pkg_name, pkg_version, pkg_dist) = self.parse_repos_changelog(repos_name)
+	for line in get_cmd_output(self.manager.reprepro_cmd_list() + ["list", dist_name, repos_name]).split("\n"):
+	    match = re.match("^.+\|.+\|source: (\S+) (\S+)$", line)
+            if match and match.group(1) == pkg_name: return match.group(2)
+	return None
+    
+    # Return true if the version of the source Debian package associated to the
+    # repository specified is already in the distribution specified.
+    def is_repos_in_dist(self, repos_name, dist_name):
+	(pkg_name, pkg_version, pkg_dist) = self.parse_repos_changelog(repos_name)
+        dist_version = self.get_repos_version_in_dist(repos_name, dist_name)
+	return pkg_version == dist_version
+    
+    # Return the path to the file having the extension specified in the
+    # directory specified.
+    def get_path_to_file_with_ext(self, ext, dir):
+	candidate_list = []
+	for file in os.listdir(dir):
+	    if file.endswith(ext): candidate_list.append(os.path.join(dir, file))
+	if not len(candidate_list): raise Exception("no '%s' file in %s" % (ext, dir))
+	if len(candidate_list) > 1: raise Exception("multiple '%s' files in %s" % (ext, dir))
+	return candidate_list[0]
+    
+    # Create the directories of a release.
+    def create_release_dir(self):
+	create_dir(self.root_dir)
+	create_dir(self.root_dir + "img")
+	create_dir(self.root_dir + "repos")
+    
+    # Add the Debian packages specified to the distribution.
+    def reprepro_add_pkg(self, repos_list):
+	work_list = self.filter_repos_list(repos_list, indist=0)
+	for r in work_list:
+	    self.manager.verbose_log("Adding " + r + ".\n")
+	    changes_file_path = self.get_path_to_file_with_ext(".changes", self.build_dir + "deb/" + r)
+	    show_cmd_output(self.manager.reprepro_cmd_list() +
+			    ["--ignore=wrongdistribution", "include", self.name, changes_file_path])
+    
+    # Fetch the Mercurial repositories specified.
+    def hg_fetch(self, repos_list, empty, non_empty):
+	work_list = []
+	if empty: work_list += self.filter_repos_list(repos_list, empty=1)
+	if non_empty: work_list += self.filter_repos_list(repos_list, hg=1)
+	
+	for r in work_list:
+	    repos_path = self.get_repos_path(r)
+	    self.manager.verbose_log("Fetching repository " + r + ".\n")
+	    empty_flag = is_dir_empty(repos_path)
+	    try:
+		if empty_flag:
+                    show_cmd_output(["hg", "--cwd", repos_path, "init"])
+                else: 
+                    show_cmd_output(["hg", "--cwd", repos_path, "update", "-C", "tip"])
+                    show_cmd_output(["hg", "--cwd", repos_path, "purge", "--all"])
+		show_cmd_output(["hg", "--cwd", repos_path, "pull",
+				 "ssh://%s@%s/%s%s" % (self.manager.hg_fetch_user_name, self.manager.hg_fetch_host_name,
+						       self.manager.hg_fetch_dir_path, r)])
+		show_cmd_output(["hg", "--cwd", repos_path, "update"])
+	    except:
+                # Clean up directory to make sure we'll fetch again on the next
+                # run.
+		if empty_flag:
+		    try: make_dir_empty(repos_path)
+		    except: pass
+		raise
+    
+    # Check if the Debian changelog of the Mercurial repositories is current.
+    def hg_check(self, repos_list):
+        
+        # Get the revision out of the 'hg log' command.
+        def get_rev(file):
+            arg_list = ["hg", "log", "-l", "1"]
+            if file: arg_list.append(file)
+            lines = get_cmd_output(arg_list).split("\n")
+            if lines < 1: raise Exception("cannot get hg log revision: unexpected output")
+            match = re.match("^changeset:\s+(\d+):\w+$", lines[0])
+            if not match: raise Exception("cannot get hg log revision: unexpected output")
+            return int(match.group(1)) 
+         
+        # Filter patched packages since their changelog revision won't match the
+        # tip since the changelog is patched.
+        work_list = self.filter_repos_list(repos_list, hg=1, debchangelog=1, kpatch=0)
+	for r in work_list:
+            
+	    cur_dir = os.getcwd()
+	    os.chdir(self.get_repos_path(r))
+            tip_rev = get_rev(None)
+            changelog_rev = get_rev("debian/changelog")
+            if tip_rev != changelog_rev:
+                self.manager.stderr.write("Warning: changelog revision of '%s' is %d, tip is %d.\n" % \
+                                          (r, changelog_rev, tip_rev))
+	    os.chdir(cur_dir)
+        
+    # Apply the Teambox patches to the repositories specified.
+    def hk_update(self, repos_list):
+	
+	# Configure Quilt correctly.
+	os.environ["QUILT_PATCHES"] = "kpatch"
+	
+	work_list = self.filter_repos_list(repos_list, kpatch=1)
+	for r in work_list:
+	    self.manager.verbose_log("Applying Teambox patches to %s.\n" % (r)) 
+	    cur_dir = os.getcwd()
+	    os.chdir(self.get_repos_path(r))
+            
+            # Force the application of the patches since we are messing with the
+            # .pc directory below.
+	    show_cmd_output(["hk", "update", "-f"])
+            
+            # Move our patches directory away to void interference with the base
+            # package patches.
+            show_cmd_output(["mv", ".pc", ".pc.kpatch"])
+	    os.chdir(cur_dir)
+    
+    # Update the cowbuilder environment so that dependencies are properly
+    # updated.
+    def update_build_env(self):
+        if not self.manager.cowbuilder_dist: cowbuilder_dist = self.name
+        else: cowbuilder_dist = self.manager.cowbuilder_dist
+        cow_opt_list = ["--update",
+                        "--basepath", self.build_dir + "cow/" + "fs",
+                        "--buildplace", self.build_dir + "cow/" + "work",
+                        "--distribution", cowbuilder_dist,
+                        "--mirror", self.manager.cowbuilder_mirror,
+                        "--othermirror", self.manager.other_mirror,
+                        "--hookdir", "/var/cache/pbuilder/hooks/",
+                        "--override-config"]
+        self.manager.verbose_log("Updating build environment.\n")
+        show_cmd_output(["/usr/sbin/cowbuilder"] + cow_opt_list)
+    
+    # Build the Debian packages specified.
+    def build_pkg(self, repos_list):
+	dsc_dir = self.build_dir + "dsc/"
+	deb_dir = self.build_dir + "deb/"
+	cow_dir = self.build_dir + "cow/"
+	debootstrap_dir_path = "/usr/share/debootstrap/scripts/"
+	
+	# Create the build directory.
+	self.manager.verbose_log("\n\nCreating build directories.\n")
+	create_dir(self.build_dir)
+	create_dir(dsc_dir)
+	create_dir(deb_dir)
+	create_dir(cow_dir)
+	create_dir(cow_dir + "work")
+	
+	# Clean up the artifacts left by the previous runs.
+	for r in repos_list:
+	    delete_dir(dsc_dir + r)
+	    delete_dir(deb_dir + r)
+	
+	# Setup cowbuilder.
+        if not self.manager.cowbuilder_dist: cowbuilder_dist = self.name
+        else: cowbuilder_dist = self.manager.cowbuilder_dist
+	cow_opt_list = ["--basepath", cow_dir + "fs",
+			"--buildplace", cow_dir + "work",
+			"--distribution", cowbuilder_dist,
+			"--debootstrap", "debootstrap",
+			"--mirror", self.manager.cowbuilder_mirror,
+                        "--othermirror", self.manager.other_mirror,
+                        "--hookdir", "/var/cache/pbuilder/hooks/"]
+			
+	# Create debootstrap symlink.
+	self.manager.verbose_log("Creating debootstrap symlink.\n")
+        if self.name != self.manager.dev_dist:
+            delete_file(debootstrap_dir_path + self.name)
+            os.symlink(debootstrap_dir_path + self.manager.dev_dist, debootstrap_dir_path + self.name)
+	
+	# Use cached cowbuilder filesystem.
+	if os.path.isdir(cow_dir + "fs"):
+	    self.manager.verbose_log("Using cached cowbuilder filesystem.\n")
+	
+	# Create the cowbuilder filesystem.
+	else:
+	    self.manager.verbose_log("Creating cowbuilder filesystem.\n")
+	    try: show_cmd_output(["/usr/sbin/cowbuilder", "--create"] + cow_opt_list)
+	    except:
+		try: delete_dir(cow_dir + "fs")
+		except: pass
+		raise
+	    
+        # Build the packages. Each package must be built and added before the
+        # next package is built since it might be a build dependency of the next
+        # package. Likewise the build environment must be updated each time a
+        # package is built so that the package is seen by cowbuilder.
+	for r in repos_list:
+        
+            # Update the build environment.
+            self.manager.verbose_log("\n\n===> ")
+            self.update_build_env()
+	    
+            # Generate the source control file.
+            self.manager.verbose_log("\n\n===> Creating source control file for %s.\n" % (r))
+	    dsc_subdir = dsc_dir + r + "/"
+	    create_dir(dsc_subdir)
+	    shutil.copytree(self.repos_dir + r, dsc_subdir + r)
+	    cur_dir = os.getcwd()
+	    os.chdir(dsc_subdir + r)
+	    show_cmd_output(["dpkg-buildpackage", "-rfakeroot", "-uc", "-us", "-S", "-d", "-nc", "-Idummy"])
+	    os.chdir(cur_dir)
+            
+            # Build the package.
+	    self.manager.verbose_log("\n\n===> Building %s.\n" % (r))
+	    deb_subdir = deb_dir + r
+	    create_dir(deb_subdir)
+	    dsc_file_path = self.get_path_to_file_with_ext(".dsc", dsc_dir + r)
+	    show_cmd_output(["cowbuilder", "--build", dsc_file_path, "--buildresult", deb_subdir] + cow_opt_list)
+            
+	    # Add the package.
+            self.manager.verbose_log("\n\n===> ")
+	    self.reprepro_add_pkg([r])
+    
+    # Return a string listing the version of the source packages associated to
+    # the repositories.
+    def show_pkg_version(self, repos_list):
+	s = ""
+	for r in repos_list:
+	    s += "* %s %s, %s\n" % self.parse_repos_changelog(r)
+	return s
+    
+# Release manager.
+class ReleaseManager:
+    def __init__(self):
+    
+        # Standard output stream. Only the 'write' method is supported.
+        self.stdout = sys.stdout
+        
+        # Standard error stream. Only the 'write' method is supported.
+        self.stderr = sys.stderr
+        
+        # Trapped exception list.
+        self.trapped_exception_list = (KeyboardInterrupt, EOFError, SystemExit, Exception)
+        
+        # Path to the configuration file.
+        self.config_path = "/etc/teambox/krelease.ini"
+        
+        # True if the program should be quiet.
+        self.quiet_flag = 0
+
+        # Configuration values.
+	self.release_dir_path = None
+	self.reprepro_input_path = None
+	self.reprepro_output_path = None
+	self.cowbuilder_mirror = None
+        self.other_mirror = None
+	self.cowbuilder_dist = None
+	self.dev_release = None
+	self.backup_reprepro = None
+	self.hg_fetch_host_name = None
+	self.hg_fetch_user_name = None
+	self.hg_fetch_dir_path = None
+		
+	# Default configuration file content.
+        self.default_config_content = \
+            "[config]\n" +\
+	    "\n" +\
+            "# Path to the releases source directory.\n" +\
+            "release_dir_path = /var/krelease/release/\n" +\
+            "\n" +\
+            "# Path to the directory containing the 'conf' and 'db' directories in reprepro.\n" +\
+            "# Reprepro backups are also created in this directory in the subdirectory\n" +\
+            "# 'backup'.\n" +\
+            "reprepro_input_path = /var/krelease/reprepro/\n" +\
+            "\n" +\
+            "# Path to the directory containing the 'dists' and 'pool' directories in\n" +\
+	    "# reprepro.\n" +\
+            "reprepro_output_path = /var/www/debian/\n" +\
+            "\n" +\
+	    "# Debian mirror used by cowbuilder to fetch the build dependencies.\n" +\
+	    "cowbuilder_mirror = http://127.0.0.1/debian/\n" +\
+            "\n" +\
+            "# Additional mirrors to check (see pbuilder --othermirror option).\n" +\
+            "other_mirror = \n" +\
+            "\n" +\
+            "# Distribution used by cowbuilder to fetch the build dependencies. If this\n" +\
+            "# field is left empty, the name of the release being built is the distribution.\n" +\
+            "cowbuilder_dist = \n" +\
+            "\n" +\
+            "# Name of the Teambox development distribution.\n" +\
+            "dev_dist = k2\n" +\
+            "\n" +\
+            "# True if the reprepro input files should be backed up before modifying a\n" +\
+            "# release (ignored by internal commands).\n" +\
+            "backup_reprepro = 1\n" +\
+            "\n" +\
+            "# Host name of the machine hosting the Mercurial repositories used by the\n" +\
+            "# releases.\n" +\
+            "hg_fetch_host_name = nemo\n" +\
+            "\n" +\
+            "# Login user name on the machine specified above.\n" +\
+            "hg_fetch_user_name = krelease\n" +\
+            "\n" +\
+            "# Directory containing the Mercurial repositories on the machine specified\n" +\
+            "# above.\n" +\
+            "hg_fetch_dir_path = /home/repos/\n" +\
+            "\n"
+
+        # Help strings.
+        self.global_help_str = \
+            "Teambox release tool.\n" +\
+            "\n" +\
+            "Commands:\n" +\
+            "  help                  Show help about a command.\n" +\
+            "  new-release           Do a new release.\n" +\
+	    "  update-release        Update a release.\n" +\
+	    "  system-update         Update the system packages.\n" +\
+            "  default-config        Print the default configuration file content." +\
+            "\n" +\
+            "\n" +\
+            "Internal commands:\n" +\
+            "  reprepro-backup       Backup the reprepro input files.\n" +\
+            "  reprepro-export       Force reprepro to publish its distributions.\n" +\
+            "  reprepro-add-dist     Add a distribution to reprepro's 'distributions' file.\n" +\
+            "  reprepro-copy-dist    Copy a reprepro distribution into another.\n" +\
+            "  reprepro-add-pkg      Add Debian packages to a reprepro distribution.\n" +\
+	    "  reprepro-copy-pkg     Copy packages from one distribution into another.\n" +\
+            "  reprepro-update       Update the system packages of development distribution.\n" +\
+            "  germinate             Germinate the system package seeds.\n" +\
+            "  rebase-check          Check if some system packages need to be rebased.\n" +\
+            "  dist-cmp              Find the differences between two distributions.\n" +\
+            "  hg-fetch              Fetch the Mercurial repositories of a release.\n" +\
+            "  hg-check              Verify if the Debian changelog of the Mercurial\n" +\
+            "                        repository of a release is current.\n" +\
+	    "  hk-update             Apply the Teambox patches to the Mercurial\n" +\
+	    "                        repositories of a release.\n" +\
+            "  show-pkg-version      Show the version of the Debian packages of a release.\n" +\
+            "  build-pkg             Build the Debian packages of a release.\n" +\
+            "  update-env            Update the build environment.\n" +\
+            "\n" +\
+            "Global options:\n" +\
+            "  -h, --help [cmd]      Print help and exit.\n" +\
+            "  -c, --config [path]   Set the path to the configuration file. Default is\n" +\
+            "                        /etc/teambox/krelease.ini.\n" +\
+            "  -q, --quiet           Don't show what is going on and don't ask confirmations.\n" +\
+            "\n"
+        
+        self.help_help_str = \
+            "help [command]\n" +\
+            "\n" +\
+            "Show help about a command, or list the commands supported.\n"
+
+        self.new_release_help_str = \
+            "krelease new-release <new-version> [<base-version>]\n" +\
+            "\n" +\
+            "Create a new release of the software. The following steps are performed:\n" +\
+            "1) Setup the new release files in the release directory.\n" +\
+            "2) Fetch the missing Mercurial repositories from the repository host if\n" +\
+            "   required.\n" +\
+	    "3) Apply the Teambox patches to the Mercurial repositories if required.\n" +\
+            "4) Show the version of the Debian packages included in the Mercurial\n" +\
+            "   repositories and ask the confirmation to proceed, if required.\n" +\
+            "5) Backup the reprepro input files if required.\n" +\
+            "6) Add the new distribution name to the 'distributions' file of reprepro if\n" +\
+            "   required.\n" +\
+            "7) Copy the 'base-version' reprepro distribution in the new distribution.\n" +\
+            "   If no base version is specified on the command line, the development version\n" +\
+            "   is used.\n" +\
+	    "8) Branch to the 'update-release' command handler.\n" 
+	    
+	self.update_release_help_str = \
+            "krelease update-release [<version>]\n" +\
+            "\n" +\
+            "Update a release of the software. If no release is specified, the development\n" +\
+            "release is used. The following steps are performed:\n" +\
+            "1) Fetch the missing Mercurial repositories from the repository host if\n" +\
+            "   required.\n" +\
+	    "2) Apply the Teambox patches to the Mercurial repositories if required.\n" +\
+	    "3) Show the name and the version of the packages that would be built and added\n" +\
+	    "   to the reprepro distribution, and ask the confirmation to proceed if\n" +\
+	    "   required.\n" +\
+            "4) Backup the reprepro input files if required.\n" +\
+            "5) Build the Debian packages with cowbuilder and the distribution.\n" +\
+            "6) Add the Debian packages to the distribution.\n"
+            
+        self.system_update_help_str = \
+            "krelease system-update\n" +\
+            "\n" +\
+            "Update the development distribution with the latest packages available from the\n" +\
+            "base system distribution on which the development distribution is based. The\n" +\
+            "development distribution is copied in 'preupdate' before the update."
+            
+        self.default_config_help_str = \
+            "krelease default-config\n" +\
+            "\n" +\
+            "Print the default configuration file content.\n"
+
+        self.reprepro_backup_help_str = \
+            "krelease reprepro-backup\n" +\
+            "\n" +\
+            "Backup the reprepro database. The date is included in the backup name.\n"
+
+        self.reprepro_export_help_str = \
+            "krelease reprepro-export\n" +\
+            "\n" +\
+            "Force reprepro to update its 'dist/' directory with the content of the\n" +\
+            "'distributions' file.\n"
+
+        self.reprepro_add_dist_help_str = \
+            "krelease reprepro-add-dist <version>\n" +\
+            "\n" +\
+            "Add the distribution specified to reprepro's 'distributions' file.\n"
+
+        self.reprepro_copy_dist_help_str = \
+            "krelease reprepro-copy-dist <from_version> <to_version>\n" +\
+            "\n" +\
+            "Copy the 'from_version' reprepro distribution into the 'to_version'\n" +\
+            "distribution. This overwrites completely the content of the 'to_version'\n" +\
+            "distribution.\n"
+        
+        self.reprepro_add_pkg_help_str = \
+            "krelease reprepro-add-pkg <version> [package1, package2, ...]\n" +\
+            "\n" +\
+            "Add the source Debian packages specified to the reprepro distribution\n" +\
+	    "specified. If no packages are specified, all the packages of the release are\n" +\
+	    "added. Packages that are already present in the distribution are skipped.\n"
+
+	self.reprepro_copy_pkg_help_str = \
+            "krelease reprepro-copy-pkg <from_version> <to_version> [package1, package2, ...]\n" +\
+            "\n" +\
+            "Copy the specified source packages in the 'from_version' reprepro distribution\n" +\
+	    "to the 'to_version' distribution.\n"
+
+	self.reprepro_update_help_str = \
+            "krelease reprepro-update\n" +\
+            "\n" +\
+            "Update the development distribution by invoking the reprepro update rules.\n"
+	
+        self.germinate_help_str = \
+            "krelease germinate\n" +\
+            "\n" +\
+            "Germinate the seeds of the system packages used by Teambox. This is used to\n" +\
+            "pull a subset of the packages of the base system distribution into the\n" +\
+            "development distribution.\n"
+            
+	self.rebase_check_help_str = \
+            "krelease rebase-check\n" +\
+            "\n" +\
+            "Check if some of the system packages modified by Teambox have been clobbered\n" +\
+            "by a newer version from the base system distribution.\n"
+
+        self.dist_cmp_help_str = \
+            "krelease dist-cmp <version1> <version2>\n" +\
+            "\n" +\
+            "Find the binary packages that do not have the same version in the\n" +\
+            "distributions specified. A warning is printed if a binary package listed in\n" +\
+            "/var/krelease/reprepro/watch_pkg_list has a different version.\n"
+        
+        self.hg_fetch_help_str = \
+            "krelease hg-fetch [-m, --only-missing] <version> [repo1, repo2, ...]\n" +\
+            "\n" +\
+            "Fetch the Mercurial repositories of a release from the repository host. If\n" +\
+	    "--only-missing is specified, only the repositories that are completely empty\n" +\
+	    "are fetched. If no repositories are specified, all the repositories of the\n" +\
+	    "release are fetched. Non-empty directories that do not contain a '.hg'\n" +\
+	    "directory are skipped.\n"
+        
+        self.hg_check_help_str = \
+            "krelease hg-check <version> [repo1, repo2, ...]\n" +\
+            "\n" +\
+            "Check if the Debian changelog in the Mercurial repositories specified has been\n" +\
+            "modified in the 'tip' revision of the repository. If not, a warning is printed.\n" +\
+	    "If no repositories are specified, all the repositories of the release are\n" +\
+            "checked. Directories that do not contain a '.hg' directory or a changelog file\n" +\
+            "are skipped.\n"
+	    
+        self.hk_update_help_str = \
+            "krelease hk-update <version> [repo1, repo2, ...]\n" +\
+            "\n" +\
+	    "Apply the Teambox patches to the Mercurial repositories of a release with\n" +\
+	    "'hk update'. If no repositories are specified, all the repositories of the\n" +\
+	    "release are updated. Directories that do not contain a 'kpatch' directory are\n" +\
+	    "skipped.\n"
+	    
+        self.show_pkg_version_help_str = \
+            "krelease show-pkg-version <version> [repo1, repo2, ...]\n" +\
+            "\n" +\
+            "Show the version of the Debian packages included in the Mercurial repositories\n" +\
+            "of a release. This is done by scanning the changelog. If no repositories are\n" +\
+            "specified, all the repositories are shown.\n"
+            
+        self.build_pkg_help_str = \
+            "krelease build-pkg <version> [package1, package2, ...]\n" +\
+            "\n" +\
+            "Build the Debian packages included in the Mercurial repositories of a release.\n" +\
+	    "If no packages are specified, all the packages of the release are built. The\n" +\
+            "packages are added to the distribution.\n"
+
+        self.update_env_help_str = \
+            "krelease update-env\n" + \
+            "\n" +\
+            "Run apt-get update inside the package build environment.\n"
+        
+        # Command dispatch table. The first column is the command name, the
+        # second is the number of arguments, the third is the short options
+        # accepted, the fourth is the long options accepted, the fifth is the
+        # handler function to call, the sixth is the help string. 'None' can be
+        # specified for the number of arguments when the command takes a
+        # variable number of arguments. The arguments supplied to the handler
+        # are the values returned by getopt().
+        self.cmd_dispatch_table = \
+            (("help", None, "", [], self.handle_help, self.help_help_str),
+             ("new-release", None, "", [], self.handle_new_release, self.new_release_help_str),
+             ("update-release", None, "", [], self.handle_update_release, self.update_release_help_str),
+             ("system-update", 0, "", [], self.handle_system_update, self.system_update_help_str),
+             ("default-config", 0, "", [], self.handle_default_config, self.default_config_help_str),
+             ("reprepro-backup", 0, "", [], self.handle_reprepro_backup, self.reprepro_backup_help_str),
+             ("reprepro-export", 0, "", [], self.handle_reprepro_export, self.reprepro_export_help_str),
+             ("reprepro-add-dist", 1, "", [], self.handle_reprepro_add_dist, self.reprepro_add_dist_help_str),
+             ("reprepro-copy-dist", 2, "", [], self.handle_reprepro_copy_dist, self.reprepro_copy_dist_help_str),
+             ("reprepro-add-pkg", None, "", [], self.handle_reprepro_add_pkg, self.reprepro_add_pkg_help_str),
+             ("reprepro-copy-pkg", None, "", [], self.handle_reprepro_copy_pkg, self.reprepro_copy_pkg_help_str),
+             ("reprepro-update", 0, "", [], self.handle_reprepro_update, self.reprepro_update_help_str),
+             ("germinate", 0, "", [], self.handle_germinate, self.germinate_help_str),
+             ("rebase-check", 0, "", [], self.handle_rebase_check, self.rebase_check_help_str),
+             ("dist-cmp", 2, "", [], self.handle_dist_cmp, self.dist_cmp_help_str),
+             ("hg-fetch", None, "m", ["only-missing"], self.handle_hg_fetch, self.hg_fetch_help_str),
+             ("hg-check", None, "", [], self.handle_hg_check, self.hg_check_help_str),
+             ("hk-update", None, "", [], self.handle_hk_update, self.hk_update_help_str),
+             ("show-pkg-version", None, "", [], self.handle_show_pkg_version, self.show_pkg_version_help_str),
+             ("build-pkg", None, "", [], self.handle_build_pkg, self.build_pkg_help_str),
+             ("update-env", None, "", [], self.handle_update_env, self.update_env_help_str))
+    
+    # Log the message specified if 'quiet_flag' is false.
+    def verbose_log(self, msg):
+	if not self.quiet_flag: self.stdout.write(msg)
+    
+    # This method implements a high-level exception handler.
+    def high_level_exception_handler(self, e, ignore_error=0):
+        
+        # Raise system exit exceptions.
+        if isinstance(e, SystemExit): raise e
+        
+        # Ignore interruptions.
+        elif isinstance(e, KeyboardInterrupt) or isinstance(e, EOFError): return
+         
+        # Print errors, exit if requested.
+        else:
+            self.stderr.write("Error: " + str(e) + ".\n")
+            if ignore_error: return
+            sys.exit(1)
+
+    # Print the program usage.
+    def print_usage(self, stream):
+        stream.write(self.global_help_str)
+
+    # Return the list of commands matching the name specified.
+    def get_cmd_list_from_name(self, name):
+        l = []
+        for entry in self.cmd_dispatch_table:
+            if entry[0].startswith(name): l.append(entry)
+        return l
+
+    # Parse the configuration file.
+    def parse_config_file(self):
+        parser = read_ini_file(self.config_path)
+	self.release_dir_path = append_trailing_slash(parser.get("config", "release_dir_path"))
+        self.reprepro_input_path = append_trailing_slash(parser.get("config", "reprepro_input_path"))
+        self.reprepro_output_path = append_trailing_slash(parser.get("config", "reprepro_output_path"))
+        self.cowbuilder_mirror = append_trailing_slash(parser.get("config", "cowbuilder_mirror"))
+        self.other_mirror = parser.get("config", "other_mirror")
+        self.cowbuilder_dist = parser.get("config", "cowbuilder_dist")
+        self.dev_dist = parser.get("config", "dev_dist")
+        self.backup_reprepro = parser.getint("config", "backup_reprepro")
+        self.hg_fetch_host_name = parser.get("config", "hg_fetch_host_name")
+        self.hg_fetch_user_name = parser.get("config", "hg_fetch_user_name")
+        self.hg_fetch_dir_path = append_trailing_slash(parser.get("config", "hg_fetch_dir_path"))
+
+    # Run the specified command. This method must be passed a list containing
+    # the command name and its arguments. The method returns 0 on success, 1 on
+    # failure.
+    def run_command(self, input_arg_list):
+        cmd_list = self.get_cmd_list_from_name(input_arg_list[0])
+        if len(cmd_list) != 1:
+            if len(cmd_list) == 0:
+                self.stderr.write("No such command.\n")
+            else: 
+                self.stderr.write("Ambiguous command: ")
+                for cmd in cmd_list: self.stderr.write(cmd[0] + " ")
+                self.stderr.write("\n")
+            return 1
+            
+        cmd = cmd_list[0]
+        
+        # Parse the options of the command.
+        try: cmd_opts, cmd_args = getopt.getopt(input_arg_list[1:], cmd[2], cmd[3])
+        except getopt.GetoptError, e:
+            self.stderr.write("Command options error: %s.\n\n" % (str(e)))
+            self.stderr.write(cmd[5])
+            return 1
+       
+        # Verify the number of arguments.
+        if cmd[1] != None and cmd[1] != len(cmd_args):
+            self.stderr.write("Invalid number of arguments.\n\n")
+            self.stderr.write(cmd[5])
+            return 1
+        
+        # Call the handler.
+        cmd[4](cmd_opts, cmd_args)
+    
+    # Create a SingleRelease object with the name specified.
+    def get_single_release(self, name):
+	return SingleRelease(self, name)
+    
+    # Return the path to the 'distributions' file of reprepro.
+    def reprepro_dist_file_path(self):
+	return self.reprepro_input_path + "conf/distributions"
+    
+    # Return the reprepro command list formatted with the path options.
+    def reprepro_cmd_list(self):
+	return ["reprepro",  "--basedir", self.reprepro_input_path, "--outdir", self.reprepro_output_path]
+    
+    # Backup the reprepro files.
+    def backup_reprepro_files(self):
+	# Create the root backup directory if required.
+	root_backup_dir = self.reprepro_input_path + "backup/"
+	create_dir(root_backup_dir)
+	
+	# Create a new backup directory.
+	while 1:
+	    new_backup_dir = root_backup_dir + str(int(time.time())) + "/"
+	    if not os.path.isdir(new_backup_dir): break
+	    time.sleep(1)
+	
+	create_dir(new_backup_dir)
+	
+	# Copy the files to backup.
+	shutil.copytree(self.reprepro_input_path + "conf", new_backup_dir + "conf")
+	shutil.copytree(self.reprepro_input_path + "db", new_backup_dir + "db")
+    
+    # Backup the reprepro files if the user requested it.
+    def backup_reprepro_files_if_needed(self):
+	if self.backup_reprepro: self.backup_reprepro_files()
+    
+    # Copy packages between reprepro distributions.
+    def copy_reprepro_pkg(self, from_version, to_version, pkg_list):
+        for pkg in pkg_list:
+	    if get_cmd_output(self.reprepro_cmd_list() + ["list", from_version, pkg]) == "":
+                raise Exception("package %s does not exist in %s" % (pkg, from_version))
+            self.verbose_log("Copying package %s from %s into %s.\n" % (pkg, from_version, to_version))
+            show_cmd_output(self.reprepro_cmd_list() + ["copysrc", to_version, from_version, pkg])
+    
+    # Return true if the 'distributions' file of reprepro contains the
+    # distribution specified.
+    def reprepro_contains_dist(self, name):
+	f = read_file(self.reprepro_dist_file_path())
+	for line in f.split("\n"):
+	    if line.startswith("Codename: " + name): return 1
+	return 0
+    
+    # Add a distribution to the 'distributions' file of reprepro.
+    def add_reprepro_dist(self, name):
+	self.verbose_log("Adding distribution %s.\n" % (name))
+	if self.reprepro_contains_dist(name): raise Exception("distribution '%s' already exists" % (name))
+	
+	s = "Codename: " + name + "\n" +\
+	    "Components: main\n" +\
+            "UDebComponents: main\n" +\
+	    "Architectures: i386 source\n" +\
+	    "\n"
+	
+	f = open(self.reprepro_dist_file_path(), "ab")
+	f.write(s)
+	f.close()
+    
+    # Copy a reprepro distribution.
+    def copy_reprepro_dist(self, from_name, to_name):
+        # The '!WILDCARD' line should match all package names.
+	self.verbose_log("Copying distribution %s into %s.\n" % (from_name, to_name))
+	show_cmd_output(self.reprepro_cmd_list() + ["copyfilter", to_name, from_name, "!WILDCARD"])
+    
+    # Export the reprepro distributions.
+    def export_reprepro_dist(self):
+	self.verbose_log("Exporting distributions.\n")
+	show_cmd_output(self.reprepro_cmd_list() + ["export"])
+    
+    # Invoke the reprepro update rules.
+    def do_reprepro_update(self):
+	self.verbose_log("Invoking reprepro update rules.\n")
+	show_cmd_output(self.reprepro_cmd_list() + ["--noskipold", "update"])
+    
+    # Germinate the system package seeds.
+    def do_germinate(self):
+        tmp_dir = "/tmp/krelease_germinate/"
+        delete_dir(tmp_dir)
+        os.mkdir(tmp_dir)
+        
+        cur_dir = os.getcwd()
+        os.chdir(tmp_dir)
+        
+        # Copy the seeds in the temporary directory.
+        show_cmd_output(["/bin/cp", "-r", "/var/krelease/seeds/sys", tmp_dir])
+        
+        # Call germinate.
+        cmd_list = read_file("/var/krelease/seeds/cmd").split()
+        show_cmd_output(cmd_list + [ "-S", "file://" + tmp_dir, "-s", "sys" ])
+        
+        # Create the bash script to process the germinate output.
+        data = "#!/bin/bash\n\n" +\
+               "for pkg in $(cat $1 | tail -n +3 | head -n -2 | cut -d '|' -f 1); do echo $pkg install; done\n\n"
+        process_path = tmp_dir + "process_path"
+        write_file(process_path, data)
+        os.chmod(process_path, 0500)
+        
+        # Process the individual seeds to create the final package list.
+        seed_list = os.listdir(tmp_dir + "sys")
+        seed_list.sort()
+        seen_dict = {}
+        output = ""
+        for seed in seed_list:
+            if seed == "blacklist" or seed == "STRUCTURE": continue
+            tmp_list_path = tmp_dir + "tmp_list"
+            show_cmd_output("%s %s > %s" % (process_path, tmp_dir + seed, tmp_list_path), shell_flag = 1)
+            for line in read_file(tmp_list_path).split("\n"):
+                if line == "": continue
+                if not seen_dict.has_key(line):
+                    output += line + "\n"
+                    seen_dict[line] = 1
+        write_file("/var/krelease/reprepro/sys_pkg_list", output)
+        
+        os.chdir(cur_dir)
+        delete_dir(tmp_dir)
+    
+    # Check if some system packages need to be rebased.
+    def do_rebase_check(self):
+        trouble_list = []
+        rel = self.get_single_release(self.dev_dist)
+	for r in rel.filter_repos_list(rel.get_repos_list(), kpatch=1):
+            dist_version = rel.get_repos_version_in_dist(r, self.dev_dist)
+            if dist_version == None or dist_version.find("teambox") == -1: trouble_list.append(r)
+        if len(trouble_list):
+            s = "\nWARNING: the following system packages need to be rebased:\n"
+            for r in trouble_list:
+                s += " * %s\n" % (r)
+            s += "\n"
+            self.stdout.write(s)
+    
+    # Find the differences between two distributions.
+    def dist_cmp(self, dist1, dist2, only_warn_flag):
+        
+        def get_dist_pkg_dict(dist):
+            pkg_dict = odict()
+	    for line in get_cmd_output(self.reprepro_cmd_list() + ["list", dist]).split("\n"):
+                match = re.match("^.+\|.+\|i386: (\S+) (\S+)$", line)
+                if match: pkg_dict[match.group(1)] = match.group(2)
+            return pkg_dict
+        
+        def format_pkg_status(dist, pkg, pkg_dict):
+            s = "* " + dist + ": "
+            if pkg not in pkg_dict: s += "not present"
+            else: s += pkg_dict[pkg]
+            s += "\n"
+            return s
+        
+        def print_diff_pkg(pkg, pkg_dict1, pkg_dict2):
+            self.stdout.write("Package " + pkg + ":\n" +
+                              format_pkg_status(dist1, pkg, pkg_dict1) +
+                              format_pkg_status(dist2, pkg, pkg_dict2) +
+                              "\n")
+        
+        # Load the watch file.
+        watch_file_path = "/var/krelease/reprepro/watch_pkg_list"
+        watch_name_dict = odict()
+        if os.path.isfile(watch_file_path):
+            for line in read_file(watch_file_path).split("\n"):
+                if line == "": continue
+                watch_name_dict[line] = 1
+        
+        # Find the differences between the distributions.
+        pkg_dict1 = get_dist_pkg_dict(dist1)
+        pkg_dict2 = get_dist_pkg_dict(dist2)
+        seen_pkg_dict = odict()
+        diff_pkg_dict = odict()
+        for pkg in pkg_dict1.keys() + pkg_dict2.keys():
+            if pkg in seen_pkg_dict: continue
+            seen_pkg_dict[pkg] = 1
+            if pkg not in pkg_dict1 or pkg not in pkg_dict2 or pkg_dict1[pkg] != pkg_dict2[pkg]:
+                diff_pkg_dict[pkg] = 1
+        
+        # Split the packages between those to warn for and those not to warn
+        # for.
+        warn_list = []
+        no_warn_list = []
+        for pkg in diff_pkg_dict.keys():
+            if pkg in watch_name_dict: warn_list.append(pkg)
+            else: no_warn_list.append(pkg)
+        
+        # Print the no-warn differences.
+        if not only_warn_flag:
+            self.stdout.write("Package differences:\n\n")
+            for pkg in no_warn_list:
+                print_diff_pkg(pkg, pkg_dict1, pkg_dict2)
+        
+        # Print the differences to warn for.
+        if len(warn_list):
+            self.stdout.write("\nWARNING: important system packages have been updated:\n\n")
+            for pkg in warn_list:
+                print_diff_pkg(pkg, pkg_dict1, pkg_dict2)
+        
+    # Common method for handle_new_release() and handle_update_release().
+    def new_update_release_common(self, new_flag, version, base_version):
+	rel = self.get_single_release(version)
+	
+	# Setup the release files.
+	rel.create_release_dir()
+	if new_flag: write_file(rel.root_dir + "base_dist", base_version + "\n")
+	
+	# Fetch the missing mercurial repositories.
+	rel.hg_fetch(rel.get_repos_list(), 1, 0)
+	
+	# Apply the Teambox patches.
+	rel.hk_update(rel.get_repos_list())
+        
+        # Check if the Debian changelogs are current.
+        rel.hg_check(rel.get_repos_list())
+	
+	# Ask confirmation.
+	if new_flag:
+	    s = ""
+	    s += "Release: %s\n" % (version)
+	    s += "Base distribution: %s\n" % (base_version)
+	    s += "\n"
+	    s += "Included packages:\n"
+	    s += rel.show_pkg_version(rel.get_repos_list())
+	    s += "\n"
+	    self.stdout.write(s)
+	    if not self.quiet_flag and not get_confirm("Proceed?"): return
+	
+	    # Backup the reprepro files if needed.
+	    self.backup_reprepro_files_if_needed()
+	    
+	    # Add the new distribution in reprepro if needed.
+	    if not self.reprepro_contains_dist(version): self.add_reprepro_dist(version)
+	    
+	    # Copy the base distribution in the new distribution.
+	    self.copy_reprepro_dist(base_version, version)
+	    
+	# Get the list of packages to add to the distribution.
+	add_list = rel.filter_repos_list(rel.get_repos_list(), indist=0)
+        
+        # Sort the package list by dependencies.
+        bin_to_src_dict = {}
+        src_to_dep_dict = {}
+        partial_order_list = []
+        
+        # Cache the provided binary packages and binary dependencies.
+        for r in add_list:
+            (provide_list, depend_list) = rel.parse_repos_control_file(r)
+            for provide in provide_list:
+                bin_to_src_dict[provide] = r
+            src_to_dep_dict[r] = depend_list
+        
+        # For each source package, update the partial order.
+        for r in add_list:
+            for dep in src_to_dep_dict[r]:
+                if dep in bin_to_src_dict:
+                    partial_order_list.append([bin_to_src_dict[dep], r])
+        
+        # Sort the list.
+        add_list = topological_sort(add_list, partial_order_list)
+        
+	# We have packages to add.
+	if len(add_list):
+	    
+	    # Ask confirmation.
+	    s = ""
+	    if new_flag: s += "\n"
+	    s += "The following packages will be added:\n"
+	    s += rel.show_pkg_version(add_list)
+	    s += "\n"
+	    self.stdout.write(s)
+	    if not self.quiet_flag and not get_confirm("Proceed?"): return
+	    
+	    # Backup the reprepro files if needed.
+	    if not new_flag: self.backup_reprepro_files_if_needed()
+	    
+	    # Build the packages.
+	    rel.build_pkg(add_list)
+	    
+	# Report success.
+	self.stdout.write("Done.\n")
+    
+    # Helper method for the command handlers. If the second argument specified
+    # is a non-empty list, the method returns that list, otherwise it returns
+    # the list of repositories contained in the release specified in the first
+    # argument.
+    def _cmd_handler_get_repos_list(self, version, l):
+        if len(l): return l
+        return self.get_single_release(version).get_repos_list()
+    
+    # Helper method for the command handlers. Validate that the distribution
+    # specified exists in the release directory.
+    def _cmd_handler_validate_release(self, dist):
+        if not os.path.isdir(self.get_single_release(dist).root_dir):
+            raise Exception("release %s does not exist" % (dist))
+    
+    # Command handlers.
+    def handle_help(self, opts, args):
+        
+        # Print help about the command specified, if there is one.
+        if len(args):
+            l = self.get_cmd_list_from_name(args[0])
+            if len(l) == 0:
+                self.stdout.write("No such command.\n")
+                self.print_usage(self.stdout)
+            else:
+                first = 1
+                for cmd in l:
+                    if not first: self.stdout.write("\n")
+                    self.stdout.write(cmd[5])
+                    first = 0
+        
+        # Print global help.
+        else:
+            self.print_usage(self.stdout)
+    
+    def handle_new_release(self, opts, args):
+        if len(args) != 1 and len(args) != 2: raise Exception("invalid number of arguments")
+	new_version = args[0]
+	if len(args) == 2: base_version = args[1]
+	else: base_version = self.dev_dist
+	self.new_update_release_common(1, new_version, base_version)
+	
+    def handle_update_release(self, opts, args):
+        if len(args) != 0 and len(args) != 1: raise Exception("invalid number of arguments")
+	if len(args) == 1: version = args[0]
+	else: version = self.dev_dist
+        self._cmd_handler_validate_release(version)
+	self.new_update_release_common(0, version, None)
+    
+    def handle_system_update(self, opts, args):
+	self.copy_reprepro_dist(self.dev_dist, "preupdate")
+        self.do_germinate()
+        self.do_reprepro_update()
+        self.do_rebase_check()
+        self.dist_cmp("preupdate", self.dev_dist, 1)
+    
+    def handle_default_config(self, opts, args):
+        self.stdout.write(self.default_config_content)
+    
+    def handle_reprepro_backup(self, opts, args):
+	self.backup_reprepro_files()
+
+    def handle_reprepro_export(self, opts, args):
+        self.export_reprepro_dist()
+
+    def handle_reprepro_add_dist(self, opts, args):
+	self.add_reprepro_dist(args[0])
+
+    def handle_reprepro_copy_dist(self, opts, args):
+	self.copy_reprepro_dist(args[0], args[1])
+    
+    def handle_reprepro_add_pkg(self, opts, args):
+        if len(args) < 1: raise Exception("invalid number of arguments")
+        self._cmd_handler_validate_release(args[0])
+        self.get_single_release(args[0]).reprepro_add_pkg(self._cmd_handler_get_repos_list(args[0], args[1:]))
+
+    def handle_reprepro_copy_pkg(self, opts, args):
+        if len(args) < 2: raise Exception("invalid number of arguments")
+        self.copy_reprepro_pkg(args[0], args[1], args[2:])
+    
+    def handle_reprepro_update(self, opts, args):
+        self.do_reprepro_update()
+    
+    def handle_germinate(self, opts, args):
+        self.do_germinate()
+    
+    def handle_rebase_check(self, opts, args):
+        self.do_rebase_check()
+    
+    def handle_dist_cmp(self, opts, args):
+        self.dist_cmp(args[0], args[1], 0)
+
+    def handle_hg_fetch(self, opts, args):
+        if len(args) < 1: raise Exception("invalid number of arguments")
+        non_empty = 1
+        for k, v in opts:
+            if k == "-m" or k == "--only-missing": non_empty = 0
+        self._cmd_handler_validate_release(args[0])
+        self.get_single_release(args[0]).hg_fetch(self._cmd_handler_get_repos_list(args[0], args[1:]), 1, non_empty)
+    
+    def handle_hg_check(self, opts, args):
+        if len(args) < 1: raise Exception("invalid number of arguments")
+        self._cmd_handler_validate_release(args[0])
+        self.get_single_release(args[0]).hg_check(self._cmd_handler_get_repos_list(args[0], args[1:]))
+    
+    def handle_hk_update(self, opts, args):
+        if len(args) < 1: raise Exception("invalid number of arguments")
+        self._cmd_handler_validate_release(args[0])
+        self.get_single_release(args[0]).hk_update(self._cmd_handler_get_repos_list(args[0], args[1:]))
+
+    def handle_show_pkg_version(self, opts, args):
+        if len(args) < 1: raise Exception("invalid number of arguments")
+        self._cmd_handler_validate_release(args[0])
+        s = self.get_single_release(args[0]).show_pkg_version(self._cmd_handler_get_repos_list(args[0], args[1:]))
+        self.stdout.write(s)
+
+    def handle_build_pkg(self, opts, args):
+        if len(args) < 1: raise Exception("invalid number of arguments")
+        self._cmd_handler_validate_release(args[0])
+        self.get_single_release(args[0]).build_pkg(self._cmd_handler_get_repos_list(args[0], args[1:]))
+
+    def handle_update_env(self, opts, args):
+        if len(args) < 1: raise Exception("invalid number of arguments")
+        self.get_single_release(args[0]).update_build_env()
+
+def main():
+    help_flag = 0
+    
+    # Create an instance of the release manager.
+    manager = ReleaseManager()
+    
+    # Parse the global options.
+    try: opts, args = getopt.getopt(sys.argv[1:], "hc:q", ["help", "config", "quiet"])
+    except getopt.GetoptError, e:
+	sys.stderr.write("Options error: %s.\n\n" % (str(e)))
+	manager.print_usage(sys.stderr)
+	sys.exit(1)
+    
+    for k, v in opts:
+	if k == "-h" or k == "--help": help_flag = 1
+	elif k == "-c" or k == "--config": manager.config_path = v
+	elif k == "-q" or k == "--quiet": manager.quiet_flag = 1
+    
+    # Handle help.
+    if help_flag:
+        manager.handle_help({}, args)
+        sys.exit(0)
+    
+    # Check if a command was supplied.
+    if not len(args):
+        sys.stderr.write("Command required. Type 'krelease -h' for help.\n")
+        sys.exit(1)
+    
+    # Handle show configuration file content.
+    if len(args) == 1 and args[0] == "default-config":
+	manager.handle_default_config({}, [])
+	sys.exit(0)
+    
+    # Check if the configuration file exists.
+    if not os.path.isfile(manager.config_path):
+        manager.stderr.write("The configuration file does not exist. Try writing the following in\n" +
+                         manager.config_path + ":\n\n" + manager.default_config_content)
+        sys.exit(1)
+    
+    try:
+        # Parse the configuration file.
+        manager.parse_config_file()
+    
+        # Run the specified command.
+        sys.exit(manager.run_command(args))
+    
+    # Handle the exceptions.
+    except manager.trapped_exception_list, e:
+        #FIXME
+        raise
+        manager.high_level_exception_handler(e, 0)
+ 
+# Allow import of this module.
+if __name__ == "__main__": main()
+

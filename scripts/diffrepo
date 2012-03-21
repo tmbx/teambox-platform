@@ -1,0 +1,119 @@
+#!/usr/bin/env python
+
+# Very useful script that compares the binary packages version in 2
+# repositories and display what package have newer versions available.
+#
+# For example:
+# diffrepo file:///var/www/debian/dists/k1/main/binary-i386/Packages file:///var/www/debian/dists/gutsy/main/binary-i386/Packages
+#
+# Compare the 'gutsy' repository vs the package in the distribution.
+# This will tell if some package availabe in gutsy should be manually
+# upgraded in k1.
+#
+# Inverting the other of the arguments will tell what package were
+# customized in k1 from the version in gutsy.
+#
+# -v activates verbose mode which is useful to see what the program is
+# actually doing.
+#
+# Exit codes:
+#   0 - no errors, no difference
+#   1 - no errors, shows some difference
+#   2 - error
+
+import sys
+import os
+import gzip
+from StringIO import StringIO
+from getopt import getopt
+from urllib2 import urlopen
+from debian_bundle import deb822, debian_support
+
+global verbose
+
+verbose = False
+
+pkg_files = []
+packages = {}
+urls = []
+
+# Parse the command line.
+try:
+    opts, args = getopt(sys.argv[1:], "v")
+except:
+    print "Usage: diffrepo [-v] repo1 repo2"
+    sys.exit(2)
+
+for k, v in opts:
+    if k == '-v':
+        verbose = True
+
+# FIXME: Perhaps do proper URL validation here.
+urls = args
+
+if verbose:
+    if not explicit:
+        print "Distribution: " + current_dist
+        print "Component: " + current_comp
+        print "Architecture: " + current_arch
+    print "Main URL: " + urls[0]
+    print "Base URL: " + urls[1]
+
+# Fetch the 2 urls
+for i in urls:
+    urlfetch = urlopen(i)
+
+    h = urlfetch.info()
+    pkg_file = None
+
+    # Check the content type of what we downloaded.  Online sites
+    # always return the gziped Package list.
+    if h.has_key('Content-Type'):
+        if h['Content-Type'] == "application/x-gzip":
+            pkg_file = gzip.GzipFile("tmpfile", "r", 9, StringIO(urlfetch.read()))
+        elif h['Content-Type'] == "text/plain":
+            pkg_file = StringIO(urlfetch.read())
+
+    if pkg_file == None:
+        print "Unknown type of file downloaded."
+        sys.exit(1)
+    else:
+        pkg_files += [pkg_file]
+
+# Store the package list for the left repository.
+for pkg in deb822.Packages.iter_paragraphs(pkg_files[0]):
+    packages[pkg['Package']] = pkg
+
+has_diff = False
+diff_hash = {}
+
+# Compare the stored list of package to the versions of packages in
+# the right repository.
+for pkg in deb822.Packages.iter_paragraphs(pkg_files[1]):
+    if packages.has_key(pkg['Package']):
+        left_ver = debian_support.Version(packages[pkg['Package']]['Version'])
+        right_ver = debian_support.Version(pkg['Version'])
+
+        # Show the package we are comparing.
+        if verbose:
+            print "Checking %s %s / %s" % (pkg['Package'], left_ver, right_ver)
+
+        # Get the source package name.
+        if pkg.has_key('Source'):
+            pkg_src = pkg['Source']
+        else:
+            pkg_src = pkg['Package']
+                    
+        # Proper comparison.
+        if left_ver < right_ver:
+            has_diff = True
+            if not diff_hash.has_key(pkg_src):
+                print "%s %s < %s" % (pkg_src, left_ver, right_ver)
+                diff_hash[pkg_src] = True
+
+if has_diff:
+    sys.exit(1)
+else:
+    sys.exit(0)
+                                    
+
